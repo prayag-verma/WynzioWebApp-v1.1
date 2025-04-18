@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wynzio</title>
+    <link rel="shortcut icon" href="assets/favicon.ico" type="image/x-icon">
+    <script src="js/config.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/auth.js"></script>
+    <script>
+        // Check if user is already authenticated
+        async function checkAuth() {
+            try {
+                // First attempt to use the Auth module if available
+                if (typeof Auth !== 'undefined') {
+                    const isLoggedIn = await Auth.isLoggedIn(true); // Verify with server
+                    if (isLoggedIn) {
+                        window.location.href = '/dashboard';
+                    } else {
+                        window.location.href = '/login';
+                    }
+                    return;
+                }
+                
+                // Fallback method if Auth module not loaded
+                const config = typeof AppConfig !== 'undefined' ? AppConfig : {
+                    authTokenKey: 'wynzio_auth_token',
+                    userDataKey: 'wynzio_user_data'
+                };
+                
+                const token = localStorage.getItem(config.authTokenKey);
+                const userData = localStorage.getItem(config.userDataKey);
+                
+                if (token && userData) {
+                    // Validate the token
+                    const response = await fetch('/api/auth/validate', {
+                        method: 'GET',
+                        headers: {
+                            'Authorization': `Bearer ${token}`
+                        }
+                    });
+                    const data = await response.json();
+                    
+                    if (data.valid) {
+                        // Redirect to dashboard if authenticated
+                        window.location.href = '/dashboard';
+                    } else {
+                        // Clear invalid credentials and redirect to login
+                        localStorage.removeItem(config.authTokenKey);
+                        localStorage.removeItem(config.userDataKey);
+                        window.location.href = '/login';
+                    }
+                } else {
+                    // Redirect to login page if not authenticated
+                    window.location.href = '/login';
+                }
+            } catch (error) {
+                console.error('Authentication check error:', error);
+                // Redirect to login page if error occurs
+                window.location.href = '/login';
+            }
+        }
+        
+        // Check authentication when page loads
+        document.addEventListener('DOMContentLoaded', checkAuth);
+    </script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f8f9fa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            padding: 0;
+        }
+        
+        .loader {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #4261ee;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="loader"></div>
+</body>
+</html>

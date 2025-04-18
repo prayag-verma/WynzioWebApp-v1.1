@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Page Not Found - Wynzio</title>
+    <link rel="stylesheet" href="/css/main.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="shortcut icon" href="/assets/favicon.ico" type="image/x-icon">
+    <style>
+        .error-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            text-align: center;
+            padding: 0 20px;
+            background: linear-gradient(135deg, var(--primary-color), var(--primary-dark));
+            color: var(--white-color);
+        }
+        
+        .error-icon {
+            font-size: 5rem;
+            margin-bottom: 1.5rem;
+            opacity: 0.9;
+        }
+        
+        .error-code {
+            font-size: 3.5rem;
+            font-weight: var(--font-weight-bold);
+            margin-bottom: 1rem;
+        }
+        
+        .error-message {
+            font-size: 1.5rem;
+            margin-bottom: 2rem;
+            font-weight: var(--font-weight-medium);
+        }
+        
+        .error-description {
+            font-size: 1.1rem;
+            margin-bottom: 2rem;
+            max-width: 600px;
+            opacity: 0.9;
+        }
+        
+        .back-button {
+            padding: 0.75rem 1.5rem;
+            font-size: 1rem;
+            font-weight: var(--font-weight-medium);
+            color: var(--primary-color);
+            background-color: var(--white-color);
+            border: none;
+            border-radius: var(--border-radius-sm);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+        }
+        
+        .back-button i {
+            margin-right: 0.5rem;
+        }
+        
+        .back-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+        
+        .logo {
+            margin-bottom: 2rem;
+            max-width: 150px;
+        }
+    </style>
+</head>
+<body>
+    <div class="error-container">
+        <img src="/assets/wynzio-logo.png" alt="Wynzio Logo" class="logo">
+        <div class="error-icon">
+            <i class="fas fa-map-signs"></i>
+        </div>
+        <div class="error-code">404</div>
+        <div class="error-message">Page Not Found</div>
+        <div class="error-description">
+            The page you are looking for might have been removed, had its name changed, 
+            or is temporarily unavailable.
+        </div>
+        <a href="/" class="back-button">
+            <i class="fas fa-home"></i> Go Home
+        </a>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // If we have authentication, redirect to dashboard instead of home
+            const homeButton = document.querySelector('.back-button');
+            
+            if (localStorage.getItem('wynzio_auth_token')) {
+                homeButton.href = '/dashboard';
+            }
+        });
+    </script>
+</body>
+</html>

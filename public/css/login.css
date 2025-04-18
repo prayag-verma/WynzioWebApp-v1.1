@@ -1,0 +1,302 @@
+/* Login page specific styles */
+.login-page {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background: linear-gradient(135deg, var(--primary-color), var(--primary-dark));
+    margin: 0;
+    padding: 0;
+    animation: gradientBG 10s ease infinite;
+    background-size: 200% 200%;
+}
+
+@keyframes gradientBG {
+    0% {background-position: 0% 50%;}
+    50% {background-position: 100% 50%;}
+    100% {background-position: 0% 50%;}
+}
+
+.auth-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    width: 100%;
+    max-width: 1200px;
+    padding: 0 20px;
+}
+
+.auth-box {
+    background-color: var(--white-color);
+    border-radius: var(--border-radius-lg);
+    box-shadow: 0 15px 30px rgba(0, 0, 0, 0.1), 0 8px 15px rgba(0, 0, 0, 0.05);
+    width: 100%;
+    max-width: 400px;
+    overflow: hidden;
+    transform: translateY(0);
+    transition: all 0.3s ease;
+    animation: fadeInUp 0.5s ease-out;
+}
+
+.auth-box:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15), 0 10px 20px rgba(0, 0, 0, 0.1);
+}
+
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.logo-container {
+    text-align: center;
+    padding: 1.5rem 0;
+    background-color: rgba(0, 0, 0, 0.02);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.logo-container img {
+    max-width: 80px;
+    height: auto;
+    filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.1));
+    transition: transform 0.3s ease;
+}
+
+.logo-container img:hover {
+    transform: scale(1.05);
+}
+
+.logo-container h1 {
+    font-size: 1.5rem;
+    color: var(--primary-color);
+    margin: 0.5rem 0 0 0;
+    font-weight: var(--font-weight-medium);
+    letter-spacing: 0.5px;
+}
+
+.auth-form-container {
+    padding: 1.5rem;
+}
+
+/* Login form elements */
+#login-form .form-group {
+    margin-bottom: 1.25rem;
+}
+
+#login-form label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: var(--font-weight-medium);
+    color: var(--text-primary);
+}
+
+#login-form .input-with-icon {
+    position: relative;
+}
+
+#login-form .input-with-icon input {
+    width: 100%;
+    padding: 0.75rem 2.5rem 0.75rem 2.5rem; /* left + right icons */
+    border-radius: 8px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    background-color: rgba(0, 0, 0, 0.02);
+    transition: all 0.3s ease;
+}
+
+#login-form .input-with-icon input:focus {
+    background-color: var(--white-color);
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(66, 97, 238, 0.15);
+}
+
+#login-form .input-with-icon i.fas.fa-user,
+#login-form .input-with-icon i.fas.fa-lock {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--secondary-color);
+    font-size: 1rem;
+    pointer-events: none;
+    z-index: 2;
+    transition: color 0.3s ease;
+}
+
+#login-form .input-with-icon input:focus + i {
+    color: var(--primary-color);
+}
+
+#login-form .input-with-icon .toggle-password {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    cursor: pointer;
+    color: var(--secondary-color);
+    font-size: 1rem;
+    z-index: 2;
+    transition: color 0.3s ease;
+}
+
+#login-form .input-with-icon .toggle-password:hover {
+    color: var(--primary-color);
+}
+
+/* Error message */
+.error-message {
+    color: var(--danger-color);
+    background-color: rgba(220, 53, 69, 0.1);
+    border: 1px solid rgba(220, 53, 69, 0.2);
+    border-radius: var(--border-radius-sm);
+    padding: 0.75rem 1rem;
+    margin-bottom: 1rem;
+    display: block;
+    width: 100%;
+    font-size: 0.9rem;
+    animation: shakeError 0.6s ease-in-out;
+}
+
+@keyframes shakeError {
+    0%, 100% {transform: translateX(0);}
+    10%, 30%, 50%, 70%, 90% {transform: translateX(-5px);}
+    20%, 40%, 60%, 80% {transform: translateX(5px);}
+}
+
+.error-message.hidden {
+    display: none;
+}
+
+/* Remember me & forgot password */
+.remember-me {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+    font-size: 0.9rem;
+}
+
+.checkbox-container {
+    display: flex;
+    align-items: center;
+}
+
+.checkbox-container input {
+    margin-right: 0.5rem;
+}
+
+.forgot-password {
+    color: var(--primary-color);
+    text-decoration: none;
+    transition: all 0.3s ease;
+    font-weight: var(--font-weight-medium);
+}
+
+.forgot-password:hover {
+    text-decoration: underline;
+    color: var(--primary-dark);
+}
+
+/* Login button */
+#login-button {
+    width: 100%;
+    position: relative;
+    padding: 0.75rem;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--primary-color), var(--primary-dark));
+    font-weight: var(--font-weight-medium);
+    letter-spacing: 0.5px;
+    overflow: hidden;
+    transition: all 0.3s ease;
+}
+
+#login-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(66, 97, 238, 0.3);
+}
+
+#login-button:active {
+    transform: translateY(1px);
+}
+
+#login-button span {
+    margin-right: 0.5rem;
+    position: relative;
+    z-index: 1;
+}
+
+#login-button .fa-spinner {
+    position: absolute;
+    right: 1rem;
+    z-index: 1;
+}
+
+#login-button:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* Login button ripple effect */
+#login-button .ripple {
+    position: absolute;
+    border-radius: 50%;
+    background-color: rgba(255, 255, 255, 0.4);
+    transform: scale(0);
+    animation: ripple 0.6s linear;
+    pointer-events: none;
+}
+
+@keyframes ripple {
+    to {
+        transform: scale(4);
+        opacity: 0;
+    }
+}
+
+/* Login footer */
+.login-footer {
+    text-align: center;
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+/* Responsive adjustments */
+@media (max-width: 480px) {
+    .auth-box {
+        max-width: 100%;
+    }
+
+    .logo-container img {
+        max-width: 60px;
+    }
+    
+    .auth-form-container {
+        padding: 1rem;
+    }
+}
+
+.input-with-icon .toggle-wrapper {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 3;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    width: 30px;
+}
