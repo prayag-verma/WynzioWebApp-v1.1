@@ -3,6 +3,7 @@ const http = require("http");
 const cors = require("cors");
 const path = require("path");
 const { pool, testConnection, initializeSchema } = require("./config/db");
+const logger = require("./utils/logger");
 
 // Import configuration
 const config = require("./config/app");
@@ -10,6 +11,11 @@ const config = require("./config/app");
 // Import routes
 const authRoutes = require("./api/routes/auth");
 const userRoutes = require("./api/routes/users");
+const deviceRoutes = require("./api/routes/devices");
+
+// Import WebSocket services
+const signalingService = require("./socket/signalingService");
+const healthMonitor = require("./api/services/healthMonitor");
 
 // Create Express app
 const app = express();
@@ -39,6 +45,7 @@ app.use((req, res, next) => {
 // API Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/devices", deviceRoutes);
 
 // Static files - public directory with cache control
 app.use(express.static("public", {
@@ -116,6 +123,9 @@ app.use((req, res) => {
 // Create HTTP server
 const server = http.createServer(app);
 
+// Initialize Socket.IO server with existing HTTP server
+const io = signalingService.initialize(server);
+
 // Database initialization and server startup
 async function startServer() {
   try {
@@ -123,20 +133,23 @@ async function startServer() {
     const connected = await testConnection();
     
     if (!connected) {
-      console.error("Cannot connect to database. Exiting...");
+      logger.error("Cannot connect to database. Exiting...");
       process.exit(1);
     }
     
     // Initialize database schema if needed
     await initializeSchema();
     
+    // Start health monitoring service
+    healthMonitor.startMonitoring(io);
+    
     // Start server
     server.listen(config.port, () => {
-      console.log(`Server running on port ${config.port}`);
-      console.log(`Visit http://localhost:${config.port} to access the application`);
+      logger.info(`Server running on port ${config.port}`);
+      logger.info(`Visit http://localhost:${config.port} to access the application`);
     });
   } catch (error) {
-    console.error("Error starting server:", error);
+    logger.error("Error starting server:", error);
     process.exit(1);
   }
 }
@@ -149,22 +162,25 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
 function shutdown() {
-  console.log("Shutting down gracefully...");
+  logger.info("Shutting down gracefully...");
+  
+  // Stop health monitoring
+  healthMonitor.stopMonitoring();
   
   // Close server
   server.close(() => {
-    console.log("HTTP server closed");
+    logger.info("HTTP server closed");
     
     // Close database pool
     pool.end(() => {
-      console.log("Database pool closed");
+      logger.info("Database pool closed");
       process.exit(0);
     });
   });
   
   // Force shutdown after 10 seconds
   setTimeout(() => {
-    console.error("Forced shutdown after timeout");
+    logger.error("Forced shutdown after timeout");
     process.exit(1);
   }, 10000);
 }
