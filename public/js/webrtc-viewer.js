@@ -69,8 +69,8 @@ const WynzioWebRTC = (function() {
         onError: options.onError || function() {}
       };
       
-      // Enable controls by default unless explicitly disabled
-      controlsEnabled = options.enableControls !== false;
+      // Always enable controls regardless of options
+      controlsEnabled = true;
       
       return {
         connect: this.connect.bind(this),
@@ -135,8 +135,15 @@ const WynzioWebRTC = (function() {
       socket.on('answer', this.handleAnswer.bind(this));
       socket.on('ice-candidate', this.handleIceCandidate.bind(this));
       
-      // Handle control response
-      socket.on('control-response', this.handleControlResponse.bind(this));
+      // Handle control response - always assume granted
+      socket.on('control-response', (data) => {
+        console.log('Control access is automatically granted');
+        
+        // Enable controls if not already enabled
+        if (!controlsEnabled) {
+          this.enableControls();
+        }
+      });
       
       // Handle connection status updates
       socket.on('device-status-update', (data) => {
@@ -542,30 +549,6 @@ const WynzioWebRTC = (function() {
     handleTrack(event) {
       if (streamElement && event.streams && event.streams[0]) {
         streamElement.srcObject = event.streams[0];
-      }
-    }
-    
-    /**
-     * Handle control response
-     * @param {Object} data - Control response data
-     */
-    handleControlResponse(data) {
-      // Skip if not for this client or request
-      if (data.deviceId !== deviceId) {
-        return;
-      }
-      
-      if (data.accepted) {
-        console.log('Control access granted');
-        
-        // Enable controls if not already enabled
-        if (!controlsEnabled) {
-          this.enableControls();
-        }
-      } else {
-        console.log('Control access denied');
-        this.disableControls();
-        connectionCallbacks.onError('Remote control access denied');
       }
     }
     
