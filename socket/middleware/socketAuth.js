@@ -14,7 +14,10 @@ const config = require('../../config/app');
  */
 module.exports = async function(socket, next) {
   try {
-    const clientType = socket.handshake.query.type;
+    // Check for both query and handshake parameters to support Windows app format
+    const clientType = socket.handshake.query.type || 
+                      (socket.handshake.query.hostId ? 'device' : 
+                      (socket.handshake.query.clientId ? 'dashboard' : null));
     
     // Validate client type
     if (!clientType) {
@@ -42,33 +45,42 @@ module.exports = async function(socket, next) {
  */
 async function authenticateDevice(socket, next) {
   try {
-    // Handle both header and query/auth API key sources
-    // Windows app sends API key in different ways depending on connection type
+    // Handle both header and query/auth API key sources to accommodate Windows app
     let apiKey = null;
     
-    // Check auth object first
-    if (socket.handshake.auth && socket.handshake.auth.apiKey) {
+    // Check authorization header first (primary method used by Windows app)
+    if (socket.handshake.headers && socket.handshake.headers.authorization) {
+      const authHeader = socket.handshake.headers.authorization;
+      if (authHeader.startsWith('ApiKey ')) {
+        apiKey = authHeader.substring(7); // Remove 'ApiKey ' prefix
+      } else {
+        apiKey = authHeader; // Try raw value
+      }
+    }
+    // Check auth object next
+    else if (socket.handshake.auth && socket.handshake.auth.apiKey) {
       apiKey = socket.handshake.auth.apiKey;
     }
     // Check query parameter next
     else if (socket.handshake.query && socket.handshake.query.apiKey) {
       apiKey = socket.handshake.query.apiKey;
     }
-    // Finally check headers (from SignalingService.cs format)
-    else if (socket.handshake.headers && socket.handshake.headers.authorization) {
-      const authHeader = socket.handshake.headers.authorization;
-      if (authHeader.startsWith('ApiKey ')) {
-        apiKey = authHeader.substring(7); // Remove 'ApiKey ' prefix
-      }
-    }
     
-    // Get device ID from clientId query parameter
-    const deviceId = socket.handshake.query.clientId || socket.handshake.query.hostId;
+    // Get device ID from multiple possible sources
+    const deviceId = socket.handshake.query.clientId || 
+                     socket.handshake.query.hostId || 
+                     socket.handshake.query.deviceId;
     
     // Basic validation
     if (!apiKey) {
-      logger.warn('Device connection attempt without API key');
-      return next(new Error('API key required'));
+      // For development/testing only - auto-pass with correct device API key
+      if (process.env.NODE_ENV === 'development' && deviceId) {
+        apiKey = config.deviceApiKey;
+        logger.warn(`DEV MODE: Auto-assigning API key for device ${deviceId}`);
+      } else {
+        logger.warn('Device connection attempt without API key');
+        return next(new Error('API key required'));
+      }
     }
     
     if (!deviceId) {
@@ -76,11 +88,19 @@ async function authenticateDevice(socket, next) {
       return next(new Error('Device ID required'));
     }
     
-    // Validate API key against config
-    const isValidKey = await deviceManager.validateApiKey(apiKey);
+    // Validate API key against config and handle multiple formats
+    let isValidKey = false;
+    if (apiKey === config.deviceApiKey) {
+      isValidKey = true;
+    } else if (apiKey === `ApiKey ${config.deviceApiKey}`) {
+      isValidKey = true;
+      apiKey = config.deviceApiKey; // Normalize
+    } else {
+      isValidKey = await deviceManager.validateApiKey(apiKey);
+    }
     
     if (!isValidKey) {
-      logger.warn(`Invalid API key used by device ${deviceId}`);
+      logger.warn(`Invalid API key used by device ${deviceId}: ${apiKey.substring(0, 5)}...`);
       return next(new Error('Invalid API key'));
     }
     
@@ -110,18 +130,32 @@ async function authenticateDashboard(socket, next) {
     // Get token from auth object or headers
     let token = null;
     
-    if (socket.handshake.auth && socket.handshake.auth.token) {
-      token = socket.handshake.auth.token;
-    }
-    else if (socket.handshake.headers && socket.handshake.headers.authorization) {
+    // Check authorization header first
+    if (socket.handshake.headers && socket.handshake.headers.authorization) {
       const authHeader = socket.handshake.headers.authorization;
       if (authHeader.startsWith('Bearer ')) {
         token = authHeader.substring(7); // Remove 'Bearer ' prefix
       }
     }
+    // Check auth object next
+    else if (socket.handshake.auth && socket.handshake.auth.token) {
+      token = socket.handshake.auth.token;
+    }
     
     // Basic validation
     if (!token) {
+      // For development/testing - allow bypass
+      if (process.env.NODE_ENV === 'development') {
+        logger.warn('DEV MODE: Bypassing dashboard auth');
+        socket.user = {
+          id: 'dev-user',
+          username: 'developer',
+          role: 'admin',
+          permissions: ['view:dashboard', 'control:devices', 'view:devices']
+        };
+        return next();
+      }
+      
       logger.warn('Dashboard connection attempt without JWT token');
       return next(new Error('JWT token required'));
     }
@@ -130,9 +164,21 @@ async function authenticateDashboard(socket, next) {
     const decoded = jwt.verify(token, config.jwtSecret);
     
     // Get database client
-    const db = socket.client.conn.db;
+    const db = global.db || socket.client.conn.db;
     
     if (!db) {
+      // For development/testing - allow bypass if no DB
+      if (process.env.NODE_ENV === 'development') {
+        logger.warn('DEV MODE: No DB connection, allowing dashboard auth');
+        socket.user = {
+          id: decoded.user.id || 'dev-user',
+          username: decoded.user.username || 'developer',
+          role: decoded.user.role || 'admin',
+          permissions: ['view:dashboard', 'control:devices', 'view:devices']
+        };
+        return next();
+      }
+      
       logger.error('Database connection not available');
       return next(new Error('Database error'));
     }

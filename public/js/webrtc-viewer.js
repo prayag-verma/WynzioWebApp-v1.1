@@ -1,12 +1,14 @@
 /**
  * WebRTC Viewer for Wynzio
  * Handles screen viewing and remote control functionality
+ * Modified to match Windows app WebRTCService.cs expectations
  */
 const WynzioWebRTC = (function() {
   // Private variables
   let socket = null;
   let peerConnection = null;
   let deviceId = null;
+  let clientId = null;
   let isConnected = false;
   let viewerElement = null;
   let streamElement = null;
@@ -14,7 +16,7 @@ const WynzioWebRTC = (function() {
   let connectionCallbacks = {};
   let dataChannel = null;
   
-  // Configuration - matches Windows app settings
+  // Configuration - matches Windows app settings in ConnectionSettings.cs
   const config = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' }
@@ -51,10 +53,13 @@ const WynzioWebRTC = (function() {
         this.setViewerElement(options.viewerElement);
       }
       
-      // Set initial device ID
+      // Set device ID and generate client ID
       if (options.deviceId) {
         deviceId = options.deviceId;
       }
+      
+      // Generate a unique client ID if not provided
+      clientId = options.clientId || 'web-' + Date.now();
       
       // Set connection callbacks
       connectionCallbacks = {
@@ -110,14 +115,11 @@ const WynzioWebRTC = (function() {
      * Set up socket event handlers
      */
     setupSocketHandlers() {
-      // Handle WebRTC signaling
-      socket.on('offer', this.handleOffer.bind(this));
-      socket.on('answer', this.handleAnswer.bind(this));
-      socket.on('ice-candidate', this.handleIceCandidate.bind(this));
-      socket.on('control-response', this.handleControlResponse.bind(this));
-      
-      // Handle message events (general purpose messaging)
+      // Handle message event which includes all signaling
       socket.on('message', (data) => {
+        // Ensure the message is for us
+        if (data.to !== clientId) return;
+        
         // Route based on message type
         if (data.type === 'offer') {
           this.handleOffer(data);
@@ -127,6 +129,14 @@ const WynzioWebRTC = (function() {
           this.handleIceCandidate(data);
         }
       });
+      
+      // Direct event handlers for backward compatibility
+      socket.on('offer', this.handleOffer.bind(this));
+      socket.on('answer', this.handleAnswer.bind(this));
+      socket.on('ice-candidate', this.handleIceCandidate.bind(this));
+      
+      // Handle control response
+      socket.on('control-response', this.handleControlResponse.bind(this));
       
       // Handle connection status updates
       socket.on('device-status-update', (data) => {
@@ -179,37 +189,33 @@ const WynzioWebRTC = (function() {
           peerConnection.ontrack = this.handleTrack.bind(this);
           peerConnection.onicecandidate = this.handleLocalIceCandidate.bind(this);
           peerConnection.oniceconnectionstatechange = this.handleIceConnectionStateChange.bind(this);
+          peerConnection.ondatachannel = this.handleDataChannel.bind(this);
           
-          // Create data channel for control commands
+          // Create data channel for control commands - match Windows app datachannel name
           dataChannel = peerConnection.createDataChannel('control', {
-            ordered: true
+            ordered: true,
+            negotiated: false // Let the connection handle negotiation
           });
           
-          dataChannel.onopen = () => {
-            console.log('Data channel opened');
-          };
+          // Setup data channel events
+          this.setupDataChannel(dataChannel);
           
-          dataChannel.onclose = () => {
-            console.log('Data channel closed');
-          };
-          
-          dataChannel.onerror = (error) => {
-            console.error('Data channel error:', error);
-          };
-          
-          // Create offer - match the format used by Windows app
+          // Create offer with configuration matching SIPSorcery in Windows app
           const offer = await peerConnection.createOffer({
             offerToReceiveAudio: false,
-            offerToReceiveVideo: true
+            offerToReceiveVideo: true,
+            voiceActivityDetection: false
           });
           
-          // Set local description
+          // Set local description - required before sending
           await peerConnection.setLocalDescription(offer);
           
-          // Send offer to device - format matches WindowsApp
-          socket.emit('offer', {
-            targetId: deviceId,
-            offer: {
+          // Send offer to device - format matches SignalingService.cs expectation
+          socket.emit('message', {
+            type: 'offer',
+            from: clientId,
+            to: deviceId,
+            payload: {
               sdp: peerConnection.localDescription.sdp,
               type: peerConnection.localDescription.type
             }
@@ -238,6 +244,7 @@ const WynzioWebRTC = (function() {
           peerConnection.ontrack = null;
           peerConnection.onicecandidate = null;
           peerConnection.oniceconnectionstatechange = null;
+          peerConnection.ondatachannel = null;
           
           // Close all transceivers
           const transceivers = peerConnection.getTransceivers();
@@ -261,8 +268,20 @@ const WynzioWebRTC = (function() {
           }
         }
         
-        // Clear data channel
-        dataChannel = null;
+        // Close data channel
+        if (dataChannel) {
+          dataChannel.close();
+          dataChannel = null;
+        }
+        
+        // Send disconnect message to server for the device
+        if (socket && deviceId) {
+          socket.emit('message', {
+            type: 'disconnect',
+            from: clientId,
+            to: deviceId
+          });
+        }
         
         // Update state
         isConnected = false;
@@ -275,12 +294,56 @@ const WynzioWebRTC = (function() {
     }
     
     /**
+     * Set up data channel event handlers
+     * @param {RTCDataChannel} channel - Data channel
+     */
+    setupDataChannel(channel) {
+      if (!channel) return;
+      
+      channel.onopen = () => {
+        console.log('Data channel opened');
+      };
+      
+      channel.onclose = () => {
+        console.log('Data channel closed');
+      };
+      
+      channel.onerror = (error) => {
+        console.error('Data channel error:', error);
+      };
+      
+      channel.onmessage = (event) => {
+        try {
+          console.log('Data channel message received:', event.data);
+          // Process data channel messages here if needed
+        } catch (error) {
+          console.error('Error processing data channel message:', error);
+        }
+      };
+    }
+    
+    /**
+     * Handle incoming data channel
+     * @param {RTCDataChannelEvent} event - Data channel event
+     */
+    handleDataChannel(event) {
+      const channel = event.channel;
+      console.log('Data channel received:', channel.label);
+      
+      // If this is a control channel, set it as our data channel
+      if (channel.label === 'control') {
+        dataChannel = channel;
+        this.setupDataChannel(channel);
+      }
+    }
+    
+    /**
      * Handle incoming WebRTC offer
      * @param {Object} data - Offer data
      */
     async handleOffer(data) {
       try {
-        // Extract offer from different possible formats
+        // Extract offer details - support multiple formats
         let offerSdp, offerType, fromId;
         
         // Format 1: { deviceId, offer: { sdp, type } }
@@ -300,7 +363,7 @@ const WynzioWebRTC = (function() {
           throw new Error('Invalid offer format');
         }
         
-        // Skip if not for this client or from wrong device
+        // Skip if not from our device
         if (fromId !== deviceId) {
           return;
         }
@@ -311,16 +374,23 @@ const WynzioWebRTC = (function() {
           type: offerType
         });
         
+        // Apply remote description
         await peerConnection.setRemoteDescription(offerDesc);
+        
+        // Create answer
         const answer = await peerConnection.createAnswer();
+        
+        // Set local description
         await peerConnection.setLocalDescription(answer);
         
-        // Send answer - format matches WindowsApp
-        socket.emit('answer', {
-          targetId: deviceId,
-          answer: {
-            sdp: peerConnection.localDescription.sdp,
-            type: peerConnection.localDescription.type
+        // Send answer - matching Windows app expected format exactly
+        socket.emit('message', {
+          type: 'answer',
+          from: clientId,
+          to: deviceId,
+          payload: {
+            sdp: answer.sdp,
+            type: answer.type
           }
         });
       } catch (error) {
@@ -355,7 +425,7 @@ const WynzioWebRTC = (function() {
           throw new Error('Invalid answer format');
         }
         
-        // Skip if not for this client or from wrong device
+        // Skip if not from our device
         if (fromId !== deviceId) {
           return;
         }
@@ -397,7 +467,7 @@ const WynzioWebRTC = (function() {
           return; // Silently ignore invalid formats
         }
         
-        // Skip if not for this client or from wrong device
+        // Skip if not from our device
         if (fromId !== deviceId) {
           return;
         }
@@ -423,10 +493,12 @@ const WynzioWebRTC = (function() {
      */
     handleLocalIceCandidate(event) {
       if (event.candidate) {
-        // Send ICE candidate to peer - format matches Windows app
-        socket.emit('ice-candidate', {
-          targetId: deviceId,
-          candidate: {
+        // Send ICE candidate to device - format matches Windows app expectation
+        socket.emit('message', {
+          type: 'ice-candidate',
+          from: clientId,
+          to: deviceId,
+          payload: {
             candidate: event.candidate.candidate,
             sdpMLineIndex: event.candidate.sdpMLineIndex,
             sdpMid: event.candidate.sdpMid
@@ -578,16 +650,19 @@ const WynzioWebRTC = (function() {
       }
       
       try {
+        // Ensure command format matches Windows app InputService.cs
+        const formattedCommand = typeof command === 'string' ? command : JSON.stringify(command);
+        
         // Send through data channel if available
         if (dataChannel && dataChannel.readyState === 'open') {
-          dataChannel.send(JSON.stringify(command));
+          dataChannel.send(formattedCommand);
           return true;
         }
         
         // Fall back to signaling channel if data channel isn't available
         socket.emit('control-command', {
           deviceId: deviceId,
-          command: command
+          command: formattedCommand
         });
         
         return true;
@@ -647,7 +722,7 @@ const WynzioWebRTC = (function() {
       default: button = 'Left';
     }
     
-    // Format matches Windows InputService.cs
+    // Format exactly matches Windows InputService.cs
     instance.sendControlCommand({
       type: "MouseDown",
       button: button,
@@ -671,7 +746,7 @@ const WynzioWebRTC = (function() {
       default: button = 'Left';
     }
     
-    // Format matches Windows InputService.cs
+    // Format exactly matches Windows InputService.cs
     instance.sendControlCommand({
       type: "MouseUp",
       button: button,
@@ -688,7 +763,7 @@ const WynzioWebRTC = (function() {
     
     // Throttle mouse move events to reduce load
     if (!instance.handleMouseMove.lastSent || Date.now() - instance.handleMouseMove.lastSent > 20) {
-      // Format matches Windows InputService.cs
+      // Format exactly matches Windows InputService.cs
       instance.sendControlCommand({
         type: "MouseMove",
         x: coords.x,
@@ -706,7 +781,7 @@ const WynzioWebRTC = (function() {
     
     const delta = Math.sign(event.deltaY) * -1; // Invert delta for natural scrolling
     
-    // Format matches Windows InputService.cs
+    // Format exactly matches Windows InputService.cs
     instance.sendControlCommand({
       type: "MouseScroll",
       scrollDelta: delta * 120 // Match Windows wheel delta
@@ -726,12 +801,7 @@ const WynzioWebRTC = (function() {
       return;
     }
     
-    // Ignore modifier key events
-    if (event.key === 'Control' || event.key === 'Alt' || event.key === 'Shift' || event.key === 'Meta') {
-      return;
-    }
-    
-    // Format matches Windows InputService.cs
+    // Format exactly matches Windows InputService.cs
     instance.sendControlCommand({
       type: "KeyDown",
       keyCode: event.keyCode
@@ -746,12 +816,7 @@ const WynzioWebRTC = (function() {
       return;
     }
     
-    // Ignore modifier key events
-    if (event.key === 'Control' || event.key === 'Alt' || event.key === 'Shift' || event.key === 'Meta') {
-      return;
-    }
-    
-    // Format matches Windows InputService.cs
+    // Format exactly matches Windows InputService.cs
     instance.sendControlCommand({
       type: "KeyUp",
       keyCode: event.keyCode
@@ -775,7 +840,7 @@ const WynzioWebRTC = (function() {
     const coords = instance.getNormalizedCoordinates(event);
     if (!coords) return;
     
-    // Format matches Windows InputService.cs
+    // Format exactly matches Windows InputService.cs
     instance.sendControlCommand({
       type: "MouseDown",
       button: button,
@@ -803,7 +868,7 @@ const WynzioWebRTC = (function() {
     
     if (!coords) return;
     
-    // Format matches Windows InputService.cs
+    // Format exactly matches Windows InputService.cs
     instance.sendControlCommand({
       type: "MouseUp",
       button: button,
@@ -821,7 +886,7 @@ const WynzioWebRTC = (function() {
     
     // Throttle touch move events to reduce load
     if (!instance.handleTouchMove.lastSent || Date.now() - instance.handleTouchMove.lastSent > 50) {
-      // Format matches Windows InputService.cs
+      // Format exactly matches Windows InputService.cs
       instance.sendControlCommand({
         type: "MouseMove",
         x: coords.x,

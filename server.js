@@ -21,7 +21,12 @@ const healthMonitor = require("./api/services/healthMonitor");
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  // Allow WebSocket connections from Windows app
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Authorization', 'Content-Type']
+}));
 app.use(express.json());
 
 // Add cache control middleware for API responses
@@ -42,10 +47,21 @@ app.use((req, res, next) => {
   next();
 });
 
-// API Routes
+// Make database available globally for socket auth
+global.db = pool;
+
+// API Routes - ensure these are processed before the static file middleware
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/devices", deviceRoutes);
+
+// API 404 handler - specifically for API routes only
+app.use('/api/*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: "API endpoint not found"
+  });
+});
 
 // Static files - public directory with cache control
 app.use(express.static("public", {
@@ -69,10 +85,12 @@ app.use(express.static("public", {
 
 // Custom middleware to handle HTML5 history mode routing
 app.use((req, res, next) => {
-  if (req.method === 'GET' && 
-      !req.path.startsWith('/api') && 
-      !req.path.includes('.')) {
-    
+  // Skip API routes - they should have been handled above
+  if (req.path.startsWith('/api/')) {
+    return next();
+  }
+  
+  if (req.method === 'GET' && !req.path.includes('.')) {
     if (req.path === '/') {
       // Add cache validation headers for index
       res.setHeader('Cache-Control', 'no-cache');
@@ -102,6 +120,9 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date() });
 });
 
+// CORS Preflight for all routes - handle OPTIONS requests
+app.options('*', cors());
+
 // Catch-all route for handling 404s
 app.use((req, res) => {
   // Check if request is for an HTML file
@@ -113,7 +134,7 @@ app.use((req, res) => {
     return;
   }
   
-  // API requests
+  // API requests that haven't been handled yet
   res.status(404).json({
     success: false,
     message: "Resource not found"
@@ -144,9 +165,13 @@ async function startServer() {
     healthMonitor.startMonitoring(io);
     
     // Start server
-    server.listen(config.port, () => {
-      logger.info(`Server running on port ${config.port}`);
-      logger.info(`Visit http://localhost:${config.port} to access the application`);
+    const port = process.env.PORT || config.port || 3000;
+    server.listen(port, () => {
+      logger.info(`Server running on port ${port}`);
+      logger.info(`Visit http://localhost:${port} to access the application`);
+      
+      // Log environment mode
+      logger.info(`Running in ${process.env.NODE_ENV || 'production'} mode`);
     });
   } catch (error) {
     logger.error("Error starting server:", error);

@@ -1,6 +1,7 @@
 /**
  * device-manager.js
  * Handles device management and remote viewer functionality
+ * Modified to align with Windows app expectations
  */
 
 // Global variables
@@ -10,6 +11,7 @@ let viewerSocket = null;
 let sessionStartTime = null;
 let sessionTimer = null;
 let controlEnabled = true;
+let clientId = 'web-client-' + Date.now(); // Unique client ID for this web client
 
 document.addEventListener('DOMContentLoaded', async function() {
     try {
@@ -298,11 +300,11 @@ function capitalizeFirstLetter(string) {
  * Initialize socket for real-time updates
  */
 function initSocketUpdates() {
-    // Connect to Socket.IO server
+    // Connect to Socket.IO server with client ID matching Windows app expectations
     const socket = io('', {
         query: {
             type: 'dashboard',
-            clientId: 'web-dashboard-' + Date.now()
+            clientId: clientId // Use the globally defined client ID
         },
         auth: {
             token: Auth.getToken()
@@ -366,6 +368,12 @@ function initSocketUpdates() {
         
         // Filter and render devices
         filterDevices();
+    });
+    
+    // Listen for connection error
+    socket.on('connection-error', (data) => {
+        console.error('Connection error:', data.error);
+        showError(data.error || 'Failed to connect to device');
     });
     
     // Listen for socket disconnect
@@ -441,11 +449,11 @@ async function initViewer(deviceId) {
         // Fetch device information
         await fetchDeviceInfo(deviceId);
         
-        // Connect to Socket.IO server
+        // Connect to Socket.IO server with consistent client ID
         viewerSocket = io('', {
             query: {
                 type: 'dashboard',
-                clientId: 'web-' + Date.now()
+                clientId: clientId
             },
             auth: {
                 token: Auth.getToken()
@@ -467,12 +475,16 @@ async function initViewer(deviceId) {
             viewerSocket.on('connect', () => clearTimeout(timeout));
         });
         
-        // Initialize WebRTC client
+        // Initialize WebRTC client with config matching Windows app expectations
         rtcClient = WynzioWebRTC.initialize({
             socket: viewerSocket,
             viewerElement: 'screen-view',
             deviceId: deviceId,
+            clientId: clientId, // Use consistent client ID
             enableControls: controlEnabled,
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }
+            ],
             onConnecting: () => {
                 document.getElementById('connection-status').textContent = 'Establishing WebRTC connection...';
             },
@@ -507,7 +519,8 @@ async function initViewer(deviceId) {
             }
         });
         
-        // Send connection request to server
+        // Send connection request to initiate the WebRTC process
+        // This matches the API call expected by the server
         const response = await fetch(`/api/devices/${deviceId}/connect`, {
             method: 'POST',
             headers: {
@@ -525,6 +538,12 @@ async function initViewer(deviceId) {
         if (!data.success) {
             throw new Error(data.message || 'Failed to initiate connection');
         }
+        
+        // Send request-connection via socket to initiate WebRTC connection
+        viewerSocket.emit('request-connection', {
+            deviceId: deviceId,
+            requestId: data.requestId || 'req-' + Date.now()
+        });
         
         // Connect WebRTC client
         await rtcClient.connect(deviceId);

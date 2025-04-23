@@ -45,7 +45,11 @@ class SignalingService {
         methods: ["GET", "POST"]
       },
       pingTimeout: 10000,
-      pingInterval: 5000
+      pingInterval: 5000,
+      // Allow transport polling and websocket to match Windows app
+      transports: ['polling', 'websocket'],
+      // Make Socket.IO format compatible with Windows app
+      allowEIO3: true
     });
 
     // Authentication middleware
@@ -93,8 +97,12 @@ class SignalingService {
    * @param {Object} socket - Socket instance
    */
   handleConnection(socket) {
-    const clientType = socket.handshake.query.type;
-    const clientId = socket.handshake.query.clientId || socket.id;
+    // Check for both clientId and hostId to support Windows app format
+    const clientId = socket.handshake.query.clientId || socket.handshake.query.hostId || socket.id;
+    // Check for client type - Windows app may not send this explicitly
+    const clientType = socket.handshake.query.type || 
+                      (socket.handshake.query.hostId ? 'device' : 
+                      (socket.handshake.query.clientId ? 'dashboard' : 'unknown'));
 
     logger.info(`New ${clientType} connection: ${clientId}`);
     
@@ -114,12 +122,15 @@ class SignalingService {
       
       // Update status for devices
       if (clientType === 'device') {
-        deviceManager.updateDeviceStatus(clientId, 'offline');
-        this.io.emit('device-status-update', {
-          deviceId: clientId,
-          status: 'offline',
-          timestamp: new Date().toISOString()
-        });
+        deviceManager.updateDeviceStatus(clientId, 'offline')
+          .then(() => {
+            this.io.emit('device-status-update', {
+              deviceId: clientId,
+              status: 'offline',
+              timestamp: new Date().toISOString()
+            });
+          })
+          .catch(err => logger.error(`Error updating device status: ${err.message}`));
       }
     });
 
@@ -139,16 +150,25 @@ class SignalingService {
     this.activeConnections.set(deviceId, socket);
     this.connectionTimestamps.set(deviceId, Date.now());
 
-    // Auto-register handler - matches Windows app SignalingService.cs format
+    // Auto-register handler - matches Windows app SignalingService.cs format exactly
     socket.on('auto-register', async (deviceInfo) => {
       try {
-        // Handle both direct object and array format (Socket.IO can send either)
-        const data = Array.isArray(deviceInfo) ? deviceInfo[1] : deviceInfo;
-        
-        // Extract fields matching Windows app format
-        const { hostId, systemName, apiKey, platform, version, timestamp, metadata } = data;
+        // Handle both formats: array format from socket.io.emit('event', [eventName, data]) 
+        // or direct object from socket.io.emit('event', data)
+        let data;
+        if (Array.isArray(deviceInfo)) {
+          data = deviceInfo[1] || deviceInfo[0];
+        } else {
+          data = deviceInfo;
+        }
         
         logger.debug(`Auto-register request from ${deviceId}:`, data);
+        
+        // Extract fields using Windows app format names
+        const hostId = data.hostId || data.deviceId;
+        const systemName = data.systemName;
+        const apiKey = data.apiKey;
+        const metadata = data.metadata || {};
         
         // Validate required fields
         if (!systemName || !hostId || !apiKey) {
@@ -201,7 +221,7 @@ class SignalingService {
       }
     });
 
-    // Heartbeat handler - supports Socket.IO standard pings
+    // Handle both heartbeat formats: Windows uses Engine.IO ping (2) packet
     socket.on('heartbeat', (data) => {
       this.connectionTimestamps.set(deviceId, Date.now());
       deviceManager.updateDeviceLastSeen(deviceId)
@@ -215,16 +235,32 @@ class SignalingService {
         .catch(err => logger.error(`Error updating device last seen: ${err.message}`));
     });
 
-    // WebRTC signaling handlers
+    // WebRTC signaling handlers - modified to match Windows app format exactly
     socket.on('offer', (data) => {
       try {
-        const { targetId, offer } = data;
+        // Extract data from different possible formats
+        let targetId, offer;
+        
+        // Format 1: { targetId, offer: { sdp, type } }
+        if (data.targetId && data.offer) {
+          targetId = data.targetId;
+          offer = data.offer;
+        }
+        // Format 2: { to, payload: { sdp, type } }
+        else if (data.to && data.payload) {
+          targetId = data.to;
+          offer = {
+            sdp: data.payload.sdp,
+            type: data.payload.type
+          };
+        }
+        
         const targetSocket = this.activeConnections.get(targetId);
         
         if (targetSocket) {
-          // Format to match what Windows app expects
-          targetSocket.emit('offer', {
-            deviceId,
+          // Format to match what Windows app expects in SignalingService.cs
+          targetSocket.emit('message', {
+            type: 'offer',
             from: deviceId,
             to: targetId,
             payload: {
@@ -240,13 +276,29 @@ class SignalingService {
 
     socket.on('answer', (data) => {
       try {
-        const { targetId, answer } = data;
+        // Extract data from different possible formats
+        let targetId, answer;
+        
+        // Format 1: { targetId, answer: { sdp, type } }
+        if (data.targetId && data.answer) {
+          targetId = data.targetId;
+          answer = data.answer;
+        }
+        // Format 2: { to, payload: { sdp, type } }
+        else if (data.to && data.payload) {
+          targetId = data.to;
+          answer = {
+            sdp: data.payload.sdp,
+            type: data.payload.type
+          };
+        }
+        
         const targetSocket = this.activeConnections.get(targetId);
         
         if (targetSocket) {
           // Format to match what Windows app expects
-          targetSocket.emit('answer', {
-            deviceId,
+          targetSocket.emit('message', {
+            type: 'answer',
             from: deviceId,
             to: targetId,
             payload: {
@@ -265,13 +317,30 @@ class SignalingService {
 
     socket.on('ice-candidate', (data) => {
       try {
-        const { targetId, candidate } = data;
+        // Extract data from different possible formats
+        let targetId, candidate;
+        
+        // Format 1: { targetId, candidate: { candidate, sdpMLineIndex, sdpMid } }
+        if (data.targetId && data.candidate) {
+          targetId = data.targetId;
+          candidate = data.candidate;
+        }
+        // Format 2: { to, payload: { candidate, sdpMLineIndex, sdpMid } }
+        else if (data.to && data.payload) {
+          targetId = data.to;
+          candidate = {
+            candidate: data.payload.candidate,
+            sdpMLineIndex: data.payload.sdpMLineIndex,
+            sdpMid: data.payload.sdpMid
+          };
+        }
+        
         const targetSocket = this.activeConnections.get(targetId);
         
         if (targetSocket) {
           // Format to match what Windows app expects
-          targetSocket.emit('ice-candidate', {
-            deviceId,
+          targetSocket.emit('message', {
+            type: 'ice-candidate',
             from: deviceId,
             to: targetId,
             payload: {
@@ -286,7 +355,7 @@ class SignalingService {
       }
     });
 
-    // Handle remote control events
+    // Handle control response with format that matches Windows app
     socket.on('control-response', (data) => {
       try {
         const { requestId, accepted, peerId } = data;
@@ -305,7 +374,7 @@ class SignalingService {
       }
     });
 
-    // Handle message event (general purpose messaging)
+    // Handle message event format used by Windows app
     socket.on('message', (data) => {
       try {
         // Pass through messages to target
@@ -318,6 +387,19 @@ class SignalingService {
         }
       } catch (error) {
         logger.error(`Error processing message from ${deviceId}:`, error);
+      }
+    });
+    
+    // Handle Windows app specific control commands
+    socket.on('control-command', (data) => {
+      try {
+        if (data.peerId && this.activeConnections.has(data.peerId)) {
+          const targetSocket = this.activeConnections.get(data.peerId);
+          // Pass along as is - Windows app format
+          targetSocket.emit('control-command', data);
+        }
+      } catch (error) {
+        logger.error(`Error processing control command from ${deviceId}:`, error);
       }
     });
   }
@@ -362,7 +444,7 @@ class SignalingService {
           timestamp: new Date()
         });
 
-        // Forward request to device - format matches Windows app expectation
+        // Format message as Windows app expects
         deviceSocket.emit('message', {
           type: 'remote-control-request',
           from: userId,
@@ -380,14 +462,14 @@ class SignalingService {
       }
     });
 
-    // Handle WebRTC signaling for dashboard
+    // Handle WebRTC signaling for dashboard, formatted for Windows app
     socket.on('offer', (data) => {
       try {
         const { targetId, offer } = data;
         const targetSocket = this.activeConnections.get(targetId);
         
         if (targetSocket) {
-          // Format for Windows app expectation
+          // Format exactly as Windows app expects in SignalingService.cs
           targetSocket.emit('message', {
             type: 'offer',
             from: userId,
@@ -409,7 +491,7 @@ class SignalingService {
         const targetSocket = this.activeConnections.get(targetId);
         
         if (targetSocket) {
-          // Format for Windows app expectation
+          // Format as Windows app expects
           targetSocket.emit('message', {
             type: 'answer',
             from: userId,
@@ -431,7 +513,7 @@ class SignalingService {
         const targetSocket = this.activeConnections.get(targetId);
         
         if (targetSocket) {
-          // Format for Windows app expectation
+          // Format as Windows app expects
           targetSocket.emit('message', {
             type: 'ice-candidate',
             from: userId,
@@ -448,18 +530,18 @@ class SignalingService {
       }
     });
 
-    // Handle remote control commands
+    // Handle remote control commands - format to match InputService.cs expectations
     socket.on('control-command', (data) => {
       try {
         const { deviceId, command } = data;
         const deviceSocket = this.activeConnections.get(deviceId);
         
         if (deviceSocket) {
-          // Format specific to Windows app InputService.cs expectation
+          // Format to match what Windows app expects in InputService.cs
           deviceSocket.emit('control-command', {
             type: 'control-command',
             peerId: userId,
-            command: JSON.stringify(command)
+            command: typeof command === 'string' ? command : JSON.stringify(command)
           });
         }
       } catch (error) {
@@ -517,7 +599,12 @@ class SignalingService {
     const connections = [];
     
     this.activeConnections.forEach((socket, id) => {
-      if (socket.handshake.query.type === type) {
+      // Check both query and socket property since Windows app might store it differently
+      const socketType = socket.handshake.query.type || 
+                        (socket.handshake.query.hostId ? 'device' : 
+                        (socket.handshake.query.clientId ? 'dashboard' : 'unknown'));
+      
+      if (socketType === type) {
         connections.push(id);
       }
     });
