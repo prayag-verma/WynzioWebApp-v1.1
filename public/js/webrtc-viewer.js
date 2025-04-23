@@ -37,6 +37,29 @@ const WynzioWebRTC = (function() {
   let instance = null;
   
   /**
+   * Get stored client ID from localStorage or generate a new one
+   * @returns {string} Client ID
+   */
+  function getStoredClientId() {
+    // Use consistent key name across all files
+    const storedClientId = localStorage.getItem('wynzio_client_id');
+    
+    if (storedClientId) {
+      console.log('Using stored client ID:', storedClientId);
+      return storedClientId;
+    }
+    
+    // Generate a new client ID if none exists
+    const newClientId = 'web-client-' + Date.now();
+    
+    // Store in localStorage for persistence
+    localStorage.setItem('wynzio_client_id', newClientId);
+    console.log('Created new client ID:', newClientId);
+    
+    return newClientId;
+  }
+  
+  /**
    * WebRTC Client Class
    */
   class WebRTCClient {
@@ -66,8 +89,8 @@ const WynzioWebRTC = (function() {
         deviceId = options.deviceId;
       }
       
-      // Generate a unique client ID if not provided
-      clientId = options.clientId || 'web-' + Date.now();
+      // Use the clientId from options if provided, or get from storage
+      clientId = options.clientId || getStoredClientId();
       
       // Set connection callbacks
       connectionCallbacks = {

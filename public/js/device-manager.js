@@ -11,11 +11,33 @@ let viewerSocket = null;
 let sessionStartTime = null;
 let sessionTimer = null;
 let controlEnabled = true;
-let clientId = 'web-client-' + Date.now(); // Unique client ID for this web client
+let clientId = getOrCreateClientId(); // Use persistent client ID
 let reconnectAttempts = 0;
 let connectionMonitorInterval = null;
 let isConnecting = false;
 const MAX_RECONNECT_ATTEMPTS = 5; // Match Windows app setting
+
+
+
+    /**
+     * Get existing client ID from localStorage or create a new one
+     * @returns {string} Client ID
+     */
+    function getOrCreateClientId() {
+        // Try to get existing client ID from localStorage
+        let storedClientId = localStorage.getItem('wynzio_client_id');
+        
+        // If no client ID exists, generate a new one and store it
+        if (!storedClientId) {
+            storedClientId = 'web-client-' + Date.now();
+            localStorage.setItem('wynzio_client_id', storedClientId);
+            console.log('Created new Web client ID:', storedClientId);
+        } else {
+            console.log('Using existing Web client ID:', storedClientId);
+        }
+        
+        return storedClientId;
+    }
 
 document.addEventListener('DOMContentLoaded', async function() {
     try {
@@ -323,7 +345,7 @@ function initSocketUpdates() {
         const socket = io('', {
             query: {
                 type: 'dashboard',
-                clientId: clientId // Use the globally defined client ID
+                clientId: clientId // Use the persistent client ID
             },
             auth: {
                 token: Auth.getToken()
@@ -564,7 +586,7 @@ async function initViewer(deviceId) {
         viewerSocket = io('', {
             query: {
                 type: 'dashboard',
-                clientId: clientId
+                clientId: clientId // Use the persistent client ID
             },
             auth: {
                 token: Auth.getToken()
@@ -596,7 +618,7 @@ async function initViewer(deviceId) {
             socket: viewerSocket,
             viewerElement: 'screen-view',
             deviceId: deviceId,
-            clientId: clientId,
+            clientId: clientId, // Use the persistent client ID
             enableControls: true, // Always enable controls - no permission needed
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' }
