@@ -12,6 +12,10 @@ let sessionStartTime = null;
 let sessionTimer = null;
 let controlEnabled = true;
 let clientId = 'web-client-' + Date.now(); // Unique client ID for this web client
+let reconnectAttempts = 0;
+let connectionMonitorInterval = null;
+let isConnecting = false;
+const MAX_RECONNECT_ATTEMPTS = 5; // Match Windows app setting
 
 document.addEventListener('DOMContentLoaded', async function() {
     try {
@@ -221,6 +225,10 @@ function connectToDevice(deviceId) {
     document.getElementById('control-toggle').classList.add('active');
     controlEnabled = true;
     
+    // Reset connection state
+    isConnecting = false;
+    reconnectAttempts = 0;
+    
     // Initialize viewer
     initViewer(deviceId);
 }
@@ -385,6 +393,9 @@ function initSocketUpdates() {
         socket.on('connection-error', (data) => {
             console.error('Connection error:', data.error);
             showError(data.error || 'Failed to connect to device');
+            
+            // Reset connecting state
+            isConnecting = false;
         });
         
         // Listen for socket disconnect
@@ -398,6 +409,22 @@ function initSocketUpdates() {
             
             // Refetch devices
             fetchDevices();
+        });
+        
+        // Listen for reconnection attempts
+        socket.on('reconnect-attempt', (data) => {
+            console.log(`Reconnection attempt ${data.attempt} for device ${data.deviceId}`);
+            
+            // If we're currently viewing this device and not already connecting,
+            // try to reconnect
+            const retryButton = document.getElementById('retry-button');
+            if (retryButton && retryButton.getAttribute('data-device-id') === data.deviceId) {
+                if (!isConnecting && reconnectAttempts < 5) {
+                    console.log('Attempting to reconnect to device...');
+                    reconnectAttempts++;
+                    initViewer(data.deviceId);
+                }
+            }
         });
         
         return socket;
@@ -454,12 +481,49 @@ function initViewerControls() {
             retryButton.addEventListener('click', function() {
                 const currentDeviceId = retryButton.getAttribute('data-device-id');
                 if (currentDeviceId) {
+                    reconnectAttempts = 0; // Reset reconnect attempts
                     initViewer(currentDeviceId);
                 }
             });
         }
+        
+        // Start connection monitoring
+        startConnectionMonitoring();
     } catch (error) {
         console.error('Error initializing viewer controls:', error);
+    }
+}
+
+/**
+ * Start connection monitoring
+ */
+function startConnectionMonitoring() {
+    // Clear any existing interval
+    if (connectionMonitorInterval) {
+        clearInterval(connectionMonitorInterval);
+    }
+    
+    // Monitor connection status every 5 seconds
+    connectionMonitorInterval = setInterval(() => {
+        // If connected to a device, check status
+        if (rtcClient && rtcClient.isConnected()) {
+            // Request device status update
+            if (viewerSocket) {
+                viewerSocket.emit('device-status-request', {
+                    deviceId: document.getElementById('retry-button').getAttribute('data-device-id')
+                });
+            }
+        }
+    }, 5000);
+}
+
+/**
+ * Stop connection monitoring
+ */
+function stopConnectionMonitoring() {
+    if (connectionMonitorInterval) {
+        clearInterval(connectionMonitorInterval);
+        connectionMonitorInterval = null;
     }
 }
 
@@ -469,6 +533,9 @@ function initViewerControls() {
  */
 async function initViewer(deviceId) {
     try {
+        // Set connecting state
+        isConnecting = true;
+        
         // Show loading indicator
         const loadingIndicator = document.getElementById('loading-indicator');
         if (loadingIndicator) loadingIndicator.classList.remove('hidden');
@@ -501,7 +568,12 @@ async function initViewer(deviceId) {
             },
             auth: {
                 token: Auth.getToken()
-            }
+            },
+            reconnection: true,
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 10000,
+            timeout: 20000
         });
         
         // Wait for socket connection
@@ -542,6 +614,12 @@ async function initViewer(deviceId) {
                 const connectionStatus = document.getElementById('connection-status');
                 if (connectionStatus) connectionStatus.textContent = 'Connected';
                 
+                // Reset connecting state
+                isConnecting = false;
+                
+                // Reset reconnection attempts
+                reconnectAttempts = 0;
+                
                 // Start session timer
                 startSessionTimer();
                 
@@ -552,6 +630,9 @@ async function initViewer(deviceId) {
                 const connectionStatus = document.getElementById('connection-status');
                 if (connectionStatus) connectionStatus.textContent = 'Disconnected: ' + (reason || 'Unknown reason');
                 
+                // Reset connecting state
+                isConnecting = false;
+                
                 // Stop session timer
                 if (sessionTimer) {
                     clearInterval(sessionTimer);
@@ -560,10 +641,24 @@ async function initViewer(deviceId) {
                 
                 // Show connection error
                 showError('Connection closed: ' + (reason || 'Unknown reason'));
+                
+                // If not max reconnection attempts, try to reconnect
+                if (reconnectAttempts < 5) {
+                    const delay = 2000 * Math.pow(2, reconnectAttempts);
+                    console.log(`Scheduling reconnection attempt ${reconnectAttempts + 1} in ${delay}ms`);
+                    
+                    setTimeout(() => {
+                        reconnectAttempts++;
+                        initViewer(deviceId);
+                    }, delay);
+                }
             },
             onError: (error) => {
                 console.error('WebRTC error:', error);
                 showError(error);
+                
+                // Reset connecting state
+                isConnecting = false;
             }
         });
         
@@ -605,6 +700,7 @@ async function initViewer(deviceId) {
         } catch (apiError) {
             console.error('API connection error:', apiError);
             showError(apiError.message || 'Failed to initiate connection');
+            
             // For testing, we'll try to continue with WebRTC connection anyway
             try {
                 // Generate a fallback request ID
@@ -626,11 +722,17 @@ async function initViewer(deviceId) {
             } catch (fallbackError) {
                 console.error('Fallback connection error:', fallbackError);
                 showError('Connection failed: ' + (fallbackError.message || 'Unknown error'));
+                
+                // Reset connecting state
+                isConnecting = false;
             }
         }
     } catch (error) {
         console.error('Error connecting to device:', error);
         showError(error.message || 'Failed to connect to device');
+        
+        // Reset connecting state
+        isConnecting = false;
     }
 }
 
@@ -727,6 +829,9 @@ function showError(message) {
         // Update error message
         const errorMessage = document.getElementById('error-message');
         if (errorMessage) errorMessage.textContent = message;
+        
+        // Reset connecting state
+        isConnecting = false;
     } catch (error) {
         console.error('Error displaying connection error:', error);
     }
@@ -878,6 +983,10 @@ function refreshConnection() {
         
         const deviceId = retryButton.getAttribute('data-device-id');
         if (deviceId) {
+            // Reset reconnection attempts
+            reconnectAttempts = 0;
+            
+            // Reinitialize viewer
             initViewer(deviceId);
         }
     } catch (error) {
@@ -890,6 +999,9 @@ function refreshConnection() {
  */
 function disconnectFromDevice() {
     try {
+        // Stop connection monitoring
+        stopConnectionMonitoring();
+        
         // Disconnect WebRTC if active
         if (rtcClient) {
             rtcClient.disconnect();
@@ -910,6 +1022,12 @@ function disconnectFromDevice() {
         
         // Reset session start time
         sessionStartTime = null;
+        
+        // Reset reconnection attempts
+        reconnectAttempts = 0;
+        
+        // Reset connecting state
+        isConnecting = false;
         
         // Reset session time display
         const sessionTime = document.getElementById('session-time');

@@ -90,12 +90,17 @@ async function authenticateDevice(socket, next) {
     
     // Validate API key against config and handle multiple formats
     let isValidKey = false;
+    
+    // Check against configured API key - handle all possible formats
     if (apiKey === config.deviceApiKey) {
       isValidKey = true;
     } else if (apiKey === `ApiKey ${config.deviceApiKey}`) {
       isValidKey = true;
       apiKey = config.deviceApiKey; // Normalize
+    } else if (`ApiKey ${apiKey}` === `ApiKey ${config.deviceApiKey}`) {
+      isValidKey = true;
     } else {
+      // Fall back to database validation
       isValidKey = await deviceManager.validateApiKey(apiKey);
     }
     
@@ -135,6 +140,8 @@ async function authenticateDashboard(socket, next) {
       const authHeader = socket.handshake.headers.authorization;
       if (authHeader.startsWith('Bearer ')) {
         token = authHeader.substring(7); // Remove 'Bearer ' prefix
+      } else {
+        token = authHeader; // Try raw value
       }
     }
     // Check auth object next
@@ -171,9 +178,9 @@ async function authenticateDashboard(socket, next) {
       if (process.env.NODE_ENV === 'development') {
         logger.warn('DEV MODE: No DB connection, allowing dashboard auth');
         socket.user = {
-          id: decoded.user.id || 'dev-user',
-          username: decoded.user.username || 'developer',
-          role: decoded.user.role || 'admin',
+          id: decoded.user?.id || 'dev-user',
+          username: decoded.user?.username || 'developer',
+          role: decoded.user?.role || 'admin',
           permissions: ['view:dashboard', 'control:devices', 'view:devices']
         };
         return next();

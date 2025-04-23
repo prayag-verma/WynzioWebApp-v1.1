@@ -11,8 +11,9 @@ const config = require('../../config/app');
 // Constants
 const DEVICE_DATA_DIR = path.join(__dirname, '../../data/devices');
 const DEVICE_LOGS_DIR = path.join(__dirname, '../../data/logs');
-const OFFLINE_THRESHOLD = 300000; // 5 minutes
-const IDLE_THRESHOLD = 60000;     // 1 minute
+// Match Windows app expectations (ConnectionSettings.cs reconnect intervals)
+const OFFLINE_THRESHOLD = 300000; // 5 minutes (300000ms) - matches Windows app
+const IDLE_THRESHOLD = 60000;     // 1 minute (60000ms) - matches Windows app
 
 // Singleton instance
 let instance = null;
@@ -47,14 +48,14 @@ class DeviceManager {
     try {
       // Extract required fields - allow for multiple formats from Windows app
       const deviceId = deviceData.deviceId || deviceData.hostId;
-      const systemName = deviceData.systemName;
+      const systemName = deviceData.systemName || 'Unknown Device';
       const status = deviceData.status || 'online';
       const apiKey = deviceData.apiKey;
       const metadata = deviceData.metadata || {};
       
       // Basic validation
-      if (!deviceId || !systemName) {
-        throw new Error('Missing required device information');
+      if (!deviceId) {
+        throw new Error('Missing required device information: deviceId/hostId');
       }
       
       // Create device data object
@@ -65,6 +66,7 @@ class DeviceManager {
         firstConnection: new Date().toISOString(),
         lastConnection: new Date().toISOString(),
         lastSeen: new Date().toISOString(),
+        lastStatusChange: new Date().toISOString(),
         connections: 0,
         metadata
       };
@@ -81,6 +83,11 @@ class DeviceManager {
         // Merge with existing data
         device.firstConnection = existingDevice.firstConnection;
         device.connections = (existingDevice.connections || 0) + 1;
+        
+        // Keep existing lastStatusChange if status hasn't changed
+        if (existingDevice.status === status) {
+          device.lastStatusChange = existingDevice.lastStatusChange;
+        }
         
         // Merge metadata, keeping existing values if not updated
         device.metadata = {
@@ -144,10 +151,10 @@ class DeviceManager {
             try {
                 const data = await fs.readFile(path.join(DEVICE_DATA_DIR, 'test-devices.json'), 'utf8');
                 const testDevices = JSON.parse(data);
-                console.log('Found test devices:', testDevices.length);
+                logger.debug('Found test devices:', testDevices.length);
                 return testDevices;
             } catch (testErr) {
-                console.error('Error parsing test devices:', testErr);
+                logger.error('Error parsing test devices:', testErr);
                 // Continue with normal device loading if test data fails
             }
         }
@@ -164,10 +171,16 @@ class DeviceManager {
                     // Ensure required fields exist to prevent frontend errors
                     if (!device.status) device.status = 'unknown';
                     if (!device.systemName) device.systemName = 'Unknown Device';
+                    if (!device.lastSeen) device.lastSeen = device.lastConnection || new Date().toISOString();
+                    if (!device.lastConnection) device.lastConnection = device.lastSeen || new Date().toISOString();
+                    if (!device.lastStatusChange) device.lastStatusChange = device.lastConnection || new Date().toISOString();
+                    
+                    // Update cache with clean data
+                    this.deviceCache.set(device.deviceId, device);
                     
                     return device;
                 } catch (err) {
-                    console.warn(`Error parsing device file ${file}: ${err.message}`);
+                    logger.warn(`Error parsing device file ${file}: ${err.message}`);
                     return null;
                 }
             })
@@ -175,7 +188,7 @@ class DeviceManager {
         
         return devices.filter(device => device !== null);
     } catch (error) {
-        console.error(`Error retrieving all devices: ${error.message}`);
+        logger.error(`Error retrieving all devices: ${error.message}`);
         throw error;
     }
   }
@@ -210,6 +223,11 @@ class DeviceManager {
         throw new Error(`Device not found: ${deviceId}`);
       }
       
+      // Skip if status hasn't changed
+      if (device.status === status) {
+        return device;
+      }
+      
       // Update status
       device.status = status;
       device.lastStatusChange = new Date().toISOString();
@@ -218,6 +236,9 @@ class DeviceManager {
       if (status === 'online') {
         device.lastSeen = new Date().toISOString();
       }
+      
+      // Log status change
+      logger.info(`Device ${deviceId} status changed from ${device.status} to ${status}`);
       
       // Save to filesystem
       const deviceFilePath = path.join(DEVICE_DATA_DIR, `${deviceId}.json`);
@@ -254,9 +275,11 @@ class DeviceManager {
       device.lastSeen = now.toISOString();
       
       // Check if status needs updating based on current status
+      let statusChanged = false;
       if (device.status === 'offline' || device.status === 'idle') {
         device.status = 'online';
         device.lastStatusChange = now.toISOString();
+        statusChanged = true;
         logger.info(`Device ${deviceId} status changed to online (due to activity)`);
       }
       
@@ -290,7 +313,7 @@ class DeviceManager {
       }
       
       // Calculate time since last seen
-      const lastSeen = new Date(device.lastSeen);
+      const lastSeen = new Date(device.lastSeen || device.lastConnection);
       const now = new Date();
       const timeSinceLastSeen = now - lastSeen;
       
@@ -436,16 +459,21 @@ class DeviceManager {
         return false;
       }
       
-      // Compare with configured API key
-      // This handles both exact matches and formats with "ApiKey " prefix
+      // Compare with configured API key from config, handling multiple formats
       const configuredKey = config.deviceApiKey;
       
+      // Direct match
       if (apiKey === configuredKey) {
         return true;
       }
       
       // Check if formatted as "ApiKey XXXX"
       if (apiKey.startsWith('ApiKey ') && apiKey.substring(7) === configuredKey) {
+        return true;
+      }
+      
+      // Check if configuredKey is formatted as "ApiKey XXXX" but apiKey is not
+      if (configuredKey.startsWith('ApiKey ') && configuredKey.substring(7) === apiKey) {
         return true;
       }
       

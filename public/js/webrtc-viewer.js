@@ -10,11 +10,19 @@ const WynzioWebRTC = (function() {
   let deviceId = null;
   let clientId = null;
   let isConnected = false;
+  let isConnecting = false;
   let viewerElement = null;
   let streamElement = null;
   let controlsEnabled = false;
   let connectionCallbacks = {};
   let dataChannel = null;
+  let reconnectAttempts = 0;
+  let reconnectTimeout = null;
+  let connectionMonitorInterval = null;
+  
+  // Reconnection configuration
+  const MAX_RECONNECT_ATTEMPTS = 5;  // Match Windows app
+  const RECONNECT_BASE_DELAY = 2000; // 2 seconds base delay
   
   // Configuration - matches Windows app settings in ConnectionSettings.cs
   const config = {
@@ -69,17 +77,83 @@ const WynzioWebRTC = (function() {
         onError: options.onError || function() {}
       };
       
-      // Always enable controls regardless of options
-      controlsEnabled = true;
+      // Initialize controls state
+      controlsEnabled = options.enableControls !== false;
+      
+      // Reset connection state
+      isConnected = false;
+      isConnecting = false;
+      reconnectAttempts = 0;
+      
+      // Start connection monitoring
+      this.startConnectionMonitoring();
       
       return {
         connect: this.connect.bind(this),
         disconnect: this.disconnect.bind(this),
         isConnected: () => isConnected,
+        isConnecting: () => isConnecting,
         enableControls: this.enableControls.bind(this),
         disableControls: this.disableControls.bind(this),
         sendControlCommand: this.sendControlCommand.bind(this)
       };
+    }
+    
+    /**
+     * Start connection monitoring
+     */
+    startConnectionMonitoring() {
+      // Clear any existing interval
+      if (connectionMonitorInterval) {
+        clearInterval(connectionMonitorInterval);
+      }
+      
+      // Monitor connection status every 5 seconds
+      connectionMonitorInterval = setInterval(() => {
+        // Check if data channel is active
+        if (isConnected && dataChannel && dataChannel.readyState !== 'open') {
+          console.warn('Data channel is not open despite connected state, attempting recovery');
+          try {
+            // Try to recreate data channel
+            if (peerConnection && peerConnection.connectionState === 'connected') {
+              dataChannel = peerConnection.createDataChannel('control', {
+                ordered: true,
+                negotiated: false
+              });
+              this.setupDataChannel(dataChannel);
+            } else {
+              console.warn('Peer connection not in connected state, cannot recreate data channel');
+              // Trigger reconnection only if not already reconnecting
+              if (!isConnecting && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                this.handleConnectionFailure('Connection state mismatch');
+              }
+            }
+          } catch (err) {
+            console.error('Error recreating data channel:', err);
+          }
+        }
+        
+        // Check ICE connection state
+        if (isConnected && peerConnection && 
+            (peerConnection.iceConnectionState === 'disconnected' || 
+             peerConnection.iceConnectionState === 'failed')) {
+          console.warn('ICE connection is failing, attempting recovery');
+          // Trigger reconnection only if not already reconnecting
+          if (!isConnecting && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            this.handleConnectionFailure('ICE connection failure');
+          }
+        }
+      }, 5000);
+    }
+    
+    /**
+     * Stop connection monitoring
+     */
+    stopConnectionMonitoring() {
+      if (connectionMonitorInterval) {
+        clearInterval(connectionMonitorInterval);
+        connectionMonitorInterval = null;
+      }
     }
     
     /**
@@ -115,6 +189,8 @@ const WynzioWebRTC = (function() {
      * Set up socket event handlers
      */
     setupSocketHandlers() {
+      if (!socket) return;
+      
       // Handle message event which includes all signaling
       socket.on('message', (data) => {
         // Ensure the message is for us
@@ -137,11 +213,13 @@ const WynzioWebRTC = (function() {
       
       // Handle control response - always assume granted
       socket.on('control-response', (data) => {
-        console.log('Control access is automatically granted');
+        console.log('Control access response:', data);
         
-        // Enable controls if not already enabled
-        if (!controlsEnabled) {
-          this.enableControls();
+        // Enable controls if response indicates accepted
+        if (data.accepted) {
+          if (!controlsEnabled) {
+            this.enableControls();
+          }
         }
       });
       
@@ -152,6 +230,27 @@ const WynzioWebRTC = (function() {
           this.disconnect();
           connectionCallbacks.onDisconnected('Device went offline');
         }
+      });
+      
+      // Handle reconnection events
+      socket.on('reconnect-attempt', (data) => {
+        if (data.deviceId === deviceId && !isConnected && !isConnecting) {
+          console.log(`Reconnection attempt ${data.attempt} for device ${deviceId}`);
+          
+          // Try to reconnect if not already connecting
+          if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            this.connect(deviceId);
+          }
+        }
+      });
+      
+      // Handle connection errors
+      socket.on('connection-error', (data) => {
+        console.error('Connection error:', data.error);
+        connectionCallbacks.onError(data.error || 'Connection error');
+        
+        // Reset connecting state
+        isConnecting = false;
       });
     }
     
@@ -186,16 +285,20 @@ const WynzioWebRTC = (function() {
             await this.disconnect();
           }
           
+          // Set connecting state
+          isConnecting = true;
+          
           // Notify connecting
           connectionCallbacks.onConnecting();
           
-          // Create peer connection
+          // Create peer connection with configuration matching Windows app's WebRTCService.cs
           peerConnection = new RTCPeerConnection(config);
           
           // Set up event handlers
           peerConnection.ontrack = this.handleTrack.bind(this);
           peerConnection.onicecandidate = this.handleLocalIceCandidate.bind(this);
           peerConnection.oniceconnectionstatechange = this.handleIceConnectionStateChange.bind(this);
+          peerConnection.onconnectionstatechange = this.handleConnectionStateChange.bind(this);
           peerConnection.ondatachannel = this.handleDataChannel.bind(this);
           
           // Create data channel for control commands - match Windows app datachannel name
@@ -228,13 +331,27 @@ const WynzioWebRTC = (function() {
             }
           });
           
+          // Set a connection timeout
+          const connectionTimeout = setTimeout(() => {
+            if (isConnecting && !isConnected) {
+              isConnecting = false;
+              connectionCallbacks.onError('Connection timeout');
+              peerConnection.close();
+              reject(new Error('Connection timeout'));
+            }
+          }, 30000); // 30 second timeout
+          
           // Resolve promise with connection methods
           resolve({
             disconnect: this.disconnect.bind(this),
             sendControlCommand: this.sendControlCommand.bind(this)
           });
+          
+          // Clear timeout when promise resolves
+          clearTimeout(connectionTimeout);
         } catch (error) {
           console.error('Connection error:', error);
+          isConnecting = false;
           connectionCallbacks.onError(error.message);
           reject(error);
         }
@@ -242,15 +359,59 @@ const WynzioWebRTC = (function() {
     }
     
     /**
+     * Handle connection failure and attempt reconnection
+     * @param {String} reason - Failure reason
+     */
+    handleConnectionFailure(reason) {
+      console.warn(`Connection failure: ${reason}`);
+      
+      // Only attempt reconnect if we were previously connected
+      if (!isConnected) return;
+      
+      isConnected = false;
+      
+      // Notify disconnection
+      connectionCallbacks.onDisconnected(reason);
+      
+      // Attempt reconnection with exponential backoff
+      if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        const delay = RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts);
+        console.log(`Scheduling reconnection attempt ${reconnectAttempts + 1} in ${delay}ms`);
+        
+        // Clear any existing timeout
+        if (reconnectTimeout) {
+          clearTimeout(reconnectTimeout);
+        }
+        
+        // Schedule reconnection
+        reconnectTimeout = setTimeout(() => {
+          reconnectAttempts++;
+          this.connect(deviceId).catch(err => {
+            console.error('Reconnection attempt failed:', err);
+          });
+        }, delay);
+      } else {
+        console.error('Maximum reconnection attempts reached');
+      }
+    }
+    
+    /**
      * Disconnect from device
      */
     async disconnect() {
       try {
+        // Clear any pending reconnect timeout
+        if (reconnectTimeout) {
+          clearTimeout(reconnectTimeout);
+          reconnectTimeout = null;
+        }
+        
         // Close peer connection
         if (peerConnection) {
           peerConnection.ontrack = null;
           peerConnection.onicecandidate = null;
           peerConnection.oniceconnectionstatechange = null;
+          peerConnection.onconnectionstatechange = null;
           peerConnection.ondatachannel = null;
           
           // Close all transceivers
@@ -292,6 +453,7 @@ const WynzioWebRTC = (function() {
         
         // Update state
         isConnected = false;
+        isConnecting = false;
         
         // Notify disconnected
         connectionCallbacks.onDisconnected();
@@ -375,7 +537,19 @@ const WynzioWebRTC = (function() {
           return;
         }
         
-        // Create answer
+        // Create peer connection if not exists
+        if (!peerConnection) {
+          peerConnection = new RTCPeerConnection(config);
+          
+          // Set up event handlers
+          peerConnection.ontrack = this.handleTrack.bind(this);
+          peerConnection.onicecandidate = this.handleLocalIceCandidate.bind(this);
+          peerConnection.oniceconnectionstatechange = this.handleIceConnectionStateChange.bind(this);
+          peerConnection.onconnectionstatechange = this.handleConnectionStateChange.bind(this);
+          peerConnection.ondatachannel = this.handleDataChannel.bind(this);
+        }
+        
+        // Create RTCSessionDescription for offer
         const offerDesc = new RTCSessionDescription({
           sdp: offerSdp,
           type: offerType
@@ -432,8 +606,8 @@ const WynzioWebRTC = (function() {
           throw new Error('Invalid answer format');
         }
         
-        // Skip if not from our device
-        if (fromId !== deviceId) {
+        // Skip if not from our device or no peer connection
+        if (fromId !== deviceId || !peerConnection) {
           return;
         }
         
@@ -444,6 +618,12 @@ const WynzioWebRTC = (function() {
         });
         
         await peerConnection.setRemoteDescription(answerDesc);
+        
+        // Mark connection as established when remote description is set
+        isConnecting = false;
+        
+        // Reset reconnection attempts on successful connection
+        reconnectAttempts = 0;
       } catch (error) {
         console.error('Error handling answer:', error);
         connectionCallbacks.onError('Failed to process answer: ' + error.message);
@@ -474,8 +654,8 @@ const WynzioWebRTC = (function() {
           return; // Silently ignore invalid formats
         }
         
-        // Skip if not from our device
-        if (fromId !== deviceId) {
+        // Skip if not from our device or no peer connection
+        if (fromId !== deviceId || !peerConnection) {
           return;
         }
         
@@ -499,7 +679,9 @@ const WynzioWebRTC = (function() {
      * @param {Object} event - ICE candidate event
      */
     handleLocalIceCandidate(event) {
-      if (event.candidate) {
+      if (!event.candidate) return;
+      
+      try {
         // Send ICE candidate to device - format matches Windows app expectation
         socket.emit('message', {
           type: 'ice-candidate',
@@ -511,6 +693,8 @@ const WynzioWebRTC = (function() {
             sdpMid: event.candidate.sdpMid
           }
         });
+      } catch (error) {
+        console.error('Error sending ICE candidate:', error);
       }
     }
     
@@ -528,15 +712,62 @@ const WynzioWebRTC = (function() {
         case 'completed':
           if (!isConnected) {
             isConnected = true;
+            isConnecting = false;
             connectionCallbacks.onConnected();
           }
           break;
         case 'failed':
+          // If connection was previously established, try to recover
+          if (isConnected) {
+            this.handleConnectionFailure('ICE connection failed');
+          } else if (isConnecting) {
+            isConnecting = false;
+            connectionCallbacks.onError('ICE connection failed during setup');
+          }
+          break;
         case 'disconnected':
+          // Wait for reconnection attempt by ICE layer
+          console.warn('ICE connection disconnected, waiting for recovery');
+          break;
         case 'closed':
           if (isConnected) {
             isConnected = false;
-            connectionCallbacks.onDisconnected(state);
+            connectionCallbacks.onDisconnected('Connection closed');
+          }
+          break;
+      }
+    }
+    
+    /**
+     * Handle connection state change
+     */
+    handleConnectionStateChange() {
+      if (!peerConnection) return;
+      
+      const state = peerConnection.connectionState;
+      console.log('Connection state:', state);
+      
+      switch (state) {
+        case 'connected':
+          if (!isConnected) {
+            isConnected = true;
+            isConnecting = false;
+            connectionCallbacks.onConnected();
+          }
+          break;
+        case 'failed':
+          // If connection was previously established, try to recover
+          if (isConnected) {
+            this.handleConnectionFailure('Connection failed');
+          } else if (isConnecting) {
+            isConnecting = false;
+            connectionCallbacks.onError('Connection failed during setup');
+          }
+          break;
+        case 'closed':
+          if (isConnected) {
+            isConnected = false;
+            connectionCallbacks.onDisconnected('Connection closed');
           }
           break;
       }
@@ -549,6 +780,18 @@ const WynzioWebRTC = (function() {
     handleTrack(event) {
       if (streamElement && event.streams && event.streams[0]) {
         streamElement.srcObject = event.streams[0];
+        
+        // Log resolution when track is added
+        const videoTrack = event.streams[0].getVideoTracks()[0];
+        if (videoTrack) {
+          console.log('Video track added:', videoTrack.getSettings());
+          
+          // When video starts playing, signal connection is fully established
+          streamElement.onloadedmetadata = () => {
+            console.log('Video stream loaded, dimensions:', 
+                      streamElement.videoWidth, 'x', streamElement.videoHeight);
+          };
+        }
       }
     }
     
@@ -625,6 +868,7 @@ const WynzioWebRTC = (function() {
      * Send control command to device
      * Format exactly matches Windows app InputService.cs expectations
      * @param {Object} command - Control command
+     * @returns {Boolean} Whether the command was sent successfully
      */
     sendControlCommand(command) {
       if (!isConnected) {
@@ -633,22 +877,93 @@ const WynzioWebRTC = (function() {
       }
       
       try {
-        // Ensure command format matches Windows app InputService.cs
-        const formattedCommand = typeof command === 'string' ? command : JSON.stringify(command);
+        // Validate command format to exactly match Windows app InputService.cs expectations
+        let validatedCommand;
+        
+        if (typeof command === 'string') {
+          try {
+            // Parse JSON string to validate
+            validatedCommand = JSON.parse(command);
+            
+            // Convert back to string after validation
+            validatedCommand = command;
+          } catch (e) {
+            // Not valid JSON, use as is
+            validatedCommand = command;
+          }
+        } else if (typeof command === 'object') {
+          // Ensure required fields based on command type
+          if (!command.type) {
+            throw new Error('Command missing required type field');
+          }
+          
+          // Validate command format based on type
+          switch (command.type) {
+            case 'MouseMove':
+              if (typeof command.x !== 'number' || typeof command.y !== 'number') {
+                throw new Error('MouseMove command missing x or y coordinates');
+              }
+              break;
+            case 'MouseDown':
+            case 'MouseUp':
+              if (!command.button) {
+                throw new Error(`${command.type} command missing button field`);
+              }
+              break;
+            case 'MouseClick':
+              if (!command.button) {
+                throw new Error('MouseClick command missing button field');
+              }
+              // If coordinates provided, ensure they are numbers
+              if (command.x !== undefined && command.y !== undefined) {
+                if (typeof command.x !== 'number' || typeof command.y !== 'number') {
+                  throw new Error('MouseClick command has invalid x or y coordinates');
+                }
+              }
+              break;
+            case 'MouseScroll':
+              if (typeof command.scrollDelta !== 'number') {
+                throw new Error('MouseScroll command missing or invalid scrollDelta');
+              }
+              break;
+            case 'KeyPress':
+            case 'KeyDown':
+            case 'KeyUp':
+              if (typeof command.keyCode !== 'number') {
+                throw new Error(`${command.type} command missing or invalid keyCode`);
+              }
+              break;
+            case 'Text':
+              if (typeof command.text !== 'string') {
+                throw new Error('Text command missing or invalid text');
+              }
+              break;
+            default:
+              throw new Error(`Unknown command type: ${command.type}`);
+          }
+          
+          // Convert to string after validation
+          validatedCommand = JSON.stringify(command);
+        } else {
+          throw new Error('Invalid command format');
+        }
         
         // Send through data channel if available
         if (dataChannel && dataChannel.readyState === 'open') {
-          dataChannel.send(formattedCommand);
+          dataChannel.send(validatedCommand);
           return true;
         }
         
         // Fall back to signaling channel if data channel isn't available
-        socket.emit('control-command', {
-          deviceId: deviceId,
-          command: formattedCommand
-        });
+        if (socket) {
+          socket.emit('control-command', {
+            deviceId: deviceId,
+            command: validatedCommand
+          });
+          return true;
+        }
         
-        return true;
+        return false;
       } catch (error) {
         console.error('Error sending control command:', error);
         return false;
@@ -779,7 +1094,7 @@ const WynzioWebRTC = (function() {
   WebRTCClient.prototype.handleKeyDown = function(event) {
     if (!controlsEnabled || !isConnected) return;
     
-    // Focus is on the viewer element or its within the document
+    // Focus is on the viewer element or it's within the document
     if (!event.target.closest('#screen-view') && event.target !== document.documentElement) {
       return;
     }
@@ -794,7 +1109,7 @@ const WynzioWebRTC = (function() {
   WebRTCClient.prototype.handleKeyUp = function(event) {
     if (!controlsEnabled || !isConnected) return;
     
-    // Focus is on the viewer element or its within the document
+    // Focus is on the viewer element or it's within the document
     if (!event.target.closest('#screen-view') && event.target !== document.documentElement) {
       return;
     }
