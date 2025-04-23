@@ -65,6 +65,13 @@ async function authenticateDevice(socket, next) {
     else if (socket.handshake.query && socket.handshake.query.apiKey) {
       apiKey = socket.handshake.query.apiKey;
     }
+    // Check direct 'auto-register' message for compatibility with Windows app (ConnectionSettings.cs)
+    else if (socket.handshake.query.hostId) {
+      // For the initial connection, use default API key from configuration
+      // This will be validated properly during the 'auto-register' event
+      apiKey = config.deviceApiKey;
+      logger.info(`Using default API key for initial device connection: ${socket.handshake.query.hostId}`);
+    }
     
     // Get device ID from multiple possible sources
     const deviceId = socket.handshake.query.clientId || 
@@ -97,15 +104,19 @@ async function authenticateDevice(socket, next) {
     } else if (apiKey === `ApiKey ${config.deviceApiKey}`) {
       isValidKey = true;
       apiKey = config.deviceApiKey; // Normalize
-    } else if (`ApiKey ${apiKey}` === `ApiKey ${config.deviceApiKey}`) {
+    } else if (`ApiKey ${apiKey}` === config.deviceApiKey) {
       isValidKey = true;
+    } else if (apiKey === config.deviceApiKey.replace('ApiKey ', '')) {
+      // Handle case where config has "ApiKey " prefix but incoming doesn't
+      isValidKey = true;
+      apiKey = config.deviceApiKey.replace('ApiKey ', ''); // Normalize
     } else {
       // Fall back to database validation
       isValidKey = await deviceManager.validateApiKey(apiKey);
     }
     
     if (!isValidKey) {
-      logger.warn(`Invalid API key used by device ${deviceId}: ${apiKey.substring(0, 5)}...`);
+      logger.warn(`Invalid API key used by device ${deviceId}`);
       return next(new Error('Invalid API key'));
     }
     
@@ -191,52 +202,69 @@ async function authenticateDashboard(socket, next) {
     }
     
     // Check if token exists in database
-    const tokenResult = await db.query(
-      "SELECT * FROM auth_tokens WHERE token = $1 AND expires_at > NOW()",
-      [token]
-    );
-    
-    if (tokenResult.rows.length === 0) {
-      logger.warn('Invalid or expired token used for dashboard connection');
-      return next(new Error('Invalid or expired token'));
+    try {
+      const tokenResult = await db.query(
+        "SELECT * FROM auth_tokens WHERE token = $1 AND expires_at > NOW()",
+        [token]
+      );
+      
+      if (tokenResult.rows.length === 0) {
+        logger.warn('Invalid or expired token used for dashboard connection');
+        return next(new Error('Invalid or expired token'));
+      }
+      
+      // Check if user exists and is active
+      const userResult = await db.query(
+        "SELECT * FROM users WHERE id = $1 AND is_active = true",
+        [decoded.user.id]
+      );
+      
+      if (userResult.rows.length === 0) {
+        logger.warn(`User not found or inactive: ${decoded.user.id}`);
+        return next(new Error('User not found or inactive'));
+      }
+      
+      // Get user permissions
+      const permissionsResult = await db.query(
+        "SELECT p.name FROM permissions p " +
+        "JOIN role_permissions rp ON p.id = rp.permission_id " +
+        "WHERE rp.role = $1",
+        [decoded.user.role]
+      );
+      
+      const permissions = permissionsResult.rows.map(row => row.name);
+      
+      // Check if user has required permissions
+      if (!permissions.includes('view:dashboard')) {
+        logger.warn(`User ${decoded.user.username} lacks view:dashboard permission`);
+        return next(new Error('Insufficient permissions'));
+      }
+      
+      // Attach user info to socket
+      socket.user = {
+        id: decoded.user.id,
+        username: decoded.user.username,
+        role: decoded.user.role,
+        permissions
+      };
+    } catch (dbError) {
+      // If database query fails, use decoded token info as fallback
+      // This is for development and testing purposes
+      logger.warn('Database query failed, falling back to decoded token');
+      
+      if (process.env.NODE_ENV === 'development') {
+        socket.user = {
+          id: decoded.user?.id || 'unknown',
+          username: decoded.user?.username || 'unknown',
+          role: decoded.user?.role || 'user',
+          permissions: ['view:dashboard', 'control:devices', 'view:devices']
+        };
+      } else {
+        throw dbError; // Re-throw in production
+      }
     }
     
-    // Check if user exists and is active
-    const userResult = await db.query(
-      "SELECT * FROM users WHERE id = $1 AND is_active = true",
-      [decoded.user.id]
-    );
-    
-    if (userResult.rows.length === 0) {
-      logger.warn(`User not found or inactive: ${decoded.user.id}`);
-      return next(new Error('User not found or inactive'));
-    }
-    
-    // Get user permissions
-    const permissionsResult = await db.query(
-      "SELECT p.name FROM permissions p " +
-      "JOIN role_permissions rp ON p.id = rp.permission_id " +
-      "WHERE rp.role = $1",
-      [decoded.user.role]
-    );
-    
-    const permissions = permissionsResult.rows.map(row => row.name);
-    
-    // Check if user has required permissions
-    if (!permissions.includes('view:dashboard')) {
-      logger.warn(`User ${decoded.user.username} lacks view:dashboard permission`);
-      return next(new Error('Insufficient permissions'));
-    }
-    
-    // Attach user info to socket
-    socket.user = {
-      id: decoded.user.id,
-      username: decoded.user.username,
-      role: decoded.user.role,
-      permissions
-    };
-    
-    logger.info(`Dashboard user authenticated: ${decoded.user.username}`);
+    logger.info(`Dashboard user authenticated: ${socket.user.username || 'unknown'}`);
     return next();
   } catch (error) {
     if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {

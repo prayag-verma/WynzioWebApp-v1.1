@@ -950,12 +950,14 @@ const WynzioWebRTC = (function() {
         
         // Send through data channel if available
         if (dataChannel && dataChannel.readyState === 'open') {
+          // Windows app expects raw command format in data channel
           dataChannel.send(validatedCommand);
           return true;
         }
         
         // Fall back to signaling channel if data channel isn't available
         if (socket) {
+          // When using socket, Windows app expects wrapped format with type and command
           socket.emit('control-command', {
             deviceId: deviceId,
             command: validatedCommand

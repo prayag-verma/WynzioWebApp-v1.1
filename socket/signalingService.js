@@ -381,13 +381,15 @@ class SignalingService {
           return;
         }
         
-        // Forward message exactly as received (maintaining format integrity)
-        // but ensure 'from' field is set correctly
+        // Format message to match exactly what Windows app expects
         const forwardedMessage = {
-          ...data,
-          from: senderId
+          type: messageType,
+          from: senderId,
+          to: targetId,
+          payload: data.payload || {}
         };
         
+        // Forward message to target
         targetSocket.emit('message', forwardedMessage);
         
         // Log message type for debugging
@@ -422,6 +424,9 @@ class SignalingService {
             sdp: data.payload.sdp,
             type: data.payload.type
           };
+        } else {
+          logger.warn(`Invalid offer format from ${deviceId}`);
+          return;
         }
         
         const targetSocket = this.activeConnections.get(targetId);
@@ -460,6 +465,9 @@ class SignalingService {
             sdp: data.payload.sdp,
             type: data.payload.type
           };
+        } else {
+          logger.warn(`Invalid answer format from ${deviceId}`);
+          return;
         }
         
         const targetSocket = this.activeConnections.get(targetId);
@@ -502,6 +510,9 @@ class SignalingService {
             sdpMLineIndex: data.payload.sdpMLineIndex,
             sdpMid: data.payload.sdpMid
           };
+        } else {
+          logger.warn(`Invalid ICE candidate format from ${deviceId}`);
+          return;
         }
         
         const targetSocket = this.activeConnections.get(targetId);
@@ -549,7 +560,11 @@ class SignalingService {
         if (data.peerId && this.activeConnections.has(data.peerId)) {
           const targetSocket = this.activeConnections.get(data.peerId);
           // Pass along as is - Windows app format
-          targetSocket.emit('control-command', data);
+          targetSocket.emit('control-command', {
+            type: 'control-command',
+            peerId: deviceId,
+            command: typeof data.command === 'string' ? data.command : JSON.stringify(data.command)
+          });
         }
       } catch (error) {
         logger.error(`Error processing control command from ${deviceId}:`, error);
@@ -639,13 +654,15 @@ class SignalingService {
           return;
         }
         
-        // Forward message exactly as received (maintaining format integrity)
-        // but ensure 'from' field is set correctly
+        // Format message to match exactly what Windows app expects
         const forwardedMessage = {
-          ...data,
-          from: senderId
+          type: messageType,
+          from: senderId,
+          to: targetId,
+          payload: data.payload || {}
         };
         
+        // Forward message to target
         targetSocket.emit('message', forwardedMessage);
         
         // Log message type for debugging

@@ -1041,6 +1041,259 @@ function disconnectFromDevice() {
     }
 }
 
+/**
+ * Get normalized coordinates relative to the screen viewport
+ * @param {Event} event - Mouse or touch event
+ * @returns {Object|null} - Normalized coordinates or null if not available
+ */
+function getNormalizedCoordinates(event) {
+    try {
+        const screenView = document.getElementById('screen-view');
+        if (!screenView) return null;
+        
+        // Get the video element if it exists
+        const videoElement = screenView.querySelector('video');
+        if (!videoElement) return null;
+        
+        const rect = videoElement.getBoundingClientRect();
+        
+        // Get natural dimensions of the video if available, or use element dimensions
+        const videoWidth = videoElement.videoWidth || rect.width;
+        const videoHeight = videoElement.videoHeight || rect.height;
+        
+        // Scale factor between natural video dimensions and displayed size
+        const scaleX = videoWidth / rect.width;
+        const scaleY = videoHeight / rect.height;
+        
+        let x, y;
+        
+        if (event.type.startsWith('touch')) {
+            // Touch event
+            if (event.touches.length > 0) {
+                x = (event.touches[0].clientX - rect.left) * scaleX;
+                y = (event.touches[0].clientY - rect.top) * scaleY;
+            } else {
+                // No touches available
+                return null;
+            }
+        } else {
+            // Mouse event
+            x = (event.clientX - rect.left) * scaleX;
+            y = (event.clientY - rect.top) * scaleY;
+        }
+        
+        // Ensure coordinates are non-negative and within bounds
+        x = Math.max(0, Math.min(videoWidth, Math.round(x)));
+        y = Math.max(0, Math.min(videoHeight, Math.round(y)));
+        
+        return { x, y };
+    } catch (error) {
+        console.error('Error calculating normalized coordinates:', error);
+        return null;
+    }
+}
+
+/**
+ * Send control command to device
+ * @param {Object} command - Control command
+ * @returns {Boolean} Whether the command was sent successfully
+ */
+function sendControlCommand(command) {
+    try {
+        if (!rtcClient) {
+            console.warn('Cannot send control command: WebRTC client not initialized');
+            return false;
+        }
+        
+        if (!controlEnabled) {
+            console.warn('Cannot send control command: control is disabled');
+            return false;
+        }
+        
+        // Ensure command is in the format expected by Windows app InputService.cs
+        if (typeof command === 'object') {
+            // Format command object to match Windows app InputService.cs expectation:
+            // Mouse commands
+            if (command.type === 'MouseMove' || 
+                command.type === 'MouseDown' || 
+                command.type === 'MouseUp' || 
+                command.type === 'MouseClick') {
+                
+              // Ensure button field has correct capitalization for Windows app
+              if (command.button) {
+                const validButtons = ['Left', 'Right', 'Middle', 'XButton1', 'XButton2'];
+                // Try to match a valid button case-insensitively
+                const matchedButton = validButtons.find(b => 
+                  b.toLowerCase() === command.button.toLowerCase());
+                
+                if (matchedButton) {
+                  command.button = matchedButton; // Use proper capitalization
+                }
+              }
+              
+              // Ensure required fields for MouseMove
+              if (command.type === 'MouseMove' && (command.x === undefined || command.y === undefined)) {
+                console.warn('MouseMove command requires x,y coordinates');
+                return false;
+              }
+            }
+            
+            // For all command types, forward to the WebRTC client using the format
+            // that matches Windows app InputService.cs
+            return rtcClient.sendControlCommand(command);
+        } else if (typeof command === 'string') {
+            // Already a string, pass through
+            return rtcClient.sendControlCommand(command);
+        } else {
+            console.warn('Invalid control command format');
+            return false;
+        }
+    } catch (error) {
+        console.error('Error sending control command:', error);
+        return false;
+    }
+}
+
+/**
+ * Handle mouse down event
+ * @param {Event} event - Mouse event
+ */
+function handleMouseDown(event) {
+    if (!controlEnabled || !rtcClient) return;
+    event.preventDefault();
+    
+    // Get normalized coordinates
+    const coords = getNormalizedCoordinates(event);
+    if (!coords) return;
+    
+    // Map mouse button to format expected by Windows app
+    let button;
+    switch (event.button) {
+        case 0: button = 'Left'; break;
+        case 1: button = 'Middle'; break;
+        case 2: button = 'Right'; break;
+        default: button = 'Left';
+    }
+    
+    // Send formatted command matching Windows app InputService.cs expectations
+    sendControlCommand({
+        type: "MouseDown",
+        button: button,
+        x: coords.x,
+        y: coords.y
+    });
+}
+
+/**
+ * Handle mouse up event
+ * @param {Event} event - Mouse event
+ */
+function handleMouseUp(event) {
+    if (!controlEnabled || !rtcClient) return;
+    event.preventDefault();
+    
+    // Get normalized coordinates
+    const coords = getNormalizedCoordinates(event);
+    if (!coords) return;
+    
+    // Map mouse button to format expected by Windows app
+    let button;
+    switch (event.button) {
+        case 0: button = 'Left'; break;
+        case 1: button = 'Middle'; break;
+        case 2: button = 'Right'; break;
+        default: button = 'Left';
+    }
+    
+    // Send formatted command matching Windows app InputService.cs expectations
+    sendControlCommand({
+        type: "MouseUp",
+        button: button,
+        x: coords.x,
+        y: coords.y
+    });
+}
+
+/**
+ * Handle mouse move event
+ * @param {Event} event - Mouse event
+ */
+function handleMouseMove(event) {
+    if (!controlEnabled || !rtcClient) return;
+    
+    // Get normalized coordinates
+    const coords = getNormalizedCoordinates(event);
+    if (!coords) return;
+    
+    // Throttle mouse move events to reduce load
+    if (!handleMouseMove.lastSent || Date.now() - handleMouseMove.lastSent > 20) {
+        // Send formatted command matching Windows app InputService.cs expectations
+        sendControlCommand({
+            type: "MouseMove",
+            x: coords.x,
+            y: coords.y,
+            isRelative: false
+        });
+        
+        handleMouseMove.lastSent = Date.now();
+    }
+}
+
+/**
+ * Handle mouse wheel event
+ * @param {Event} event - Wheel event
+ */
+function handleMouseWheel(event) {
+    if (!controlEnabled || !rtcClient) return;
+    event.preventDefault();
+    
+    const delta = Math.sign(event.deltaY) * -1; // Invert delta for natural scrolling
+    
+    // Send formatted command matching Windows app InputService.cs expectations
+    sendControlCommand({
+        type: "MouseScroll",
+        scrollDelta: delta * 120 // Match Windows wheel delta
+    });
+}
+
+/**
+ * Handle key down event
+ * @param {Event} event - Keyboard event
+ */
+function handleKeyDown(event) {
+    if (!controlEnabled || !rtcClient) return;
+    
+    // Focus is on the viewer element or it's within the document
+    if (!event.target.closest('#screen-view') && event.target !== document.documentElement) {
+        return;
+    }
+    
+    // Send formatted command matching Windows app InputService.cs expectations
+    sendControlCommand({
+        type: "KeyDown",
+        keyCode: event.keyCode
+    });
+}
+
+/**
+ * Handle key up event
+ * @param {Event} event - Keyboard event
+ */
+function handleKeyUp(event) {
+    if (!controlEnabled || !rtcClient) return;
+    
+    // Focus is on the viewer element or it's within the document
+    if (!event.target.closest('#screen-view') && event.target !== document.documentElement) {
+        return;
+    }
+    
+    // Send formatted command matching Windows app InputService.cs expectations
+    sendControlCommand({
+        type: "KeyUp",
+        keyCode: event.keyCode
+    });
+}
+
 // Handle page unload
 window.addEventListener('beforeunload', function() {
     // Disconnect from device if connected
