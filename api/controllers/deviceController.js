@@ -14,13 +14,17 @@ const { v4: uuidv4 } = require('uuid');
  */
 exports.registerDevice = async (req, res) => {
   try {
-    const { deviceId, systemName, apiKey, metadata } = req.body;
+    // Support both deviceId and hostId formats (Windows app uses hostId)
+    const deviceId = req.body.deviceId || req.body.hostId;
+    const systemName = req.body.systemName;
+    const apiKey = req.body.apiKey;
+    const metadata = req.body.metadata || {};
     
     // Validate required fields
     if (!deviceId || !systemName || !apiKey) {
       return res.status(400).json({
         success: false,
-        message: "Missing required fields: deviceId, systemName, apiKey"
+        message: "Missing required fields: deviceId/hostId, systemName, apiKey"
       });
     }
     
@@ -33,16 +37,16 @@ exports.registerDevice = async (req, res) => {
       });
     }
     
-    // Register device
+    // Register device - allow both deviceId and hostId formats
     const device = await deviceManager.registerDevice({
       deviceId,
       systemName,
       status: 'online',
       apiKey,
-      metadata: metadata || {}
+      metadata: metadata
     });
     
-    // Return success
+    // Return success with expected response format
     res.json({
       success: true,
       device: {
@@ -170,6 +174,53 @@ exports.getDeviceById = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Server error retrieving device"
+    });
+  }
+};
+
+/**
+ * Update device status
+ * @param {Object} req - Express request
+ * @param {Object} res - Express response
+ */
+exports.updateDeviceStatus = async (req, res) => {
+  try {
+    const { deviceId } = req.params;
+    const { status } = req.body;
+    
+    // Validate status
+    if (!status || !['online', 'offline', 'idle'].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid status value. Must be online, offline, or idle."
+      });
+    }
+    
+    // Update device status
+    const updatedDevice = await deviceManager.updateDeviceStatus(deviceId, status);
+    
+    // Return success
+    res.json({
+      success: true,
+      device: {
+        deviceId: updatedDevice.deviceId,
+        status: updatedDevice.status,
+        lastStatusChange: updatedDevice.lastStatusChange
+      }
+    });
+  } catch (error) {
+    // Specific error for device not found
+    if (error.message && error.message.includes('Device not found')) {
+      return res.status(404).json({
+        success: false,
+        message: error.message
+      });
+    }
+    
+    logger.error('Error updating device status:', error);
+    res.status(500).json({
+      success: false,
+      message: "Server error updating device status"
     });
   }
 };

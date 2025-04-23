@@ -17,11 +17,11 @@ router.post('/register', deviceController.registerDevice);
 /**
  * @route GET /api/devices
  * @desc Get all devices
- * @access Private (admin, manager)
+ * @access Private (admin, guest)
  */
 router.get('/', 
   authMiddleware, 
-  rbacMiddleware(['admin', 'manager'], ['view:devices']), 
+  rbacMiddleware(['admin', 'guest'], ['view:devices']), 
   deviceController.getAllDevices
 );
 
@@ -83,11 +83,11 @@ router.post('/:deviceId/connect',
 /**
  * @route GET /api/devices/system/health
  * @desc Get system health overview
- * @access Private (admin, manager)
+ * @access Private (admin, guest)
  */
 router.get('/system/health', 
   authMiddleware, 
-  rbacMiddleware(['admin', 'manager'], ['view:settings']), 
+  rbacMiddleware(['admin', 'guest'], ['view:settings']), 
   deviceController.getSystemHealth
 );
 

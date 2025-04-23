@@ -3,31 +3,38 @@
  * Handles screen viewing and remote control functionality
  */
 const WynzioWebRTC = (function() {
-    // Configuration
-    const config = {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
-      ],
-      sdpSemantics: 'unified-plan'
-    };
-    
-    // Private variables
-    let socket = null;
-    let peerConnection = null;
-    let deviceId = null;
-    let isConnected = false;
-    let viewerElement = null;
-    let streamElement = null;
-    let controlsEnabled = false;
-    let connectionCallbacks = {};
-    let dataChannel = null;
-    
+  // Private variables
+  let socket = null;
+  let peerConnection = null;
+  let deviceId = null;
+  let isConnected = false;
+  let viewerElement = null;
+  let streamElement = null;
+  let controlsEnabled = false;
+  let connectionCallbacks = {};
+  let dataChannel = null;
+  
+  // Configuration - matches Windows app settings
+  const config = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' }
+    ],
+    sdpSemantics: 'unified-plan',
+    iceCandidatePoolSize: 10
+  };
+  
+  // Singleton instance
+  let instance = null;
+  
+  /**
+   * WebRTC Client Class
+   */
+  class WebRTCClient {
     /**
      * Initialize the WebRTC viewer
      * @param {Object} options - Configuration options
      */
-    function initialize(options = {}) {
+    initialize(options = {}) {
       // Set configuration
       if (options.iceServers) {
         config.iceServers = options.iceServers;
@@ -36,12 +43,12 @@ const WynzioWebRTC = (function() {
       // Set socket if provided
       if (options.socket) {
         socket = options.socket;
-        setupSocketHandlers();
+        this.setupSocketHandlers();
       }
       
       // Set view element
       if (options.viewerElement) {
-        setViewerElement(options.viewerElement);
+        this.setViewerElement(options.viewerElement);
       }
       
       // Set initial device ID
@@ -61,11 +68,12 @@ const WynzioWebRTC = (function() {
       controlsEnabled = options.enableControls !== false;
       
       return {
-        connect: connect,
-        disconnect: disconnect,
+        connect: this.connect.bind(this),
+        disconnect: this.disconnect.bind(this),
         isConnected: () => isConnected,
-        enableControls: enableControls,
-        disableControls: disableControls
+        enableControls: this.enableControls.bind(this),
+        disableControls: this.disableControls.bind(this),
+        sendControlCommand: this.sendControlCommand.bind(this)
       };
     }
     
@@ -73,7 +81,7 @@ const WynzioWebRTC = (function() {
      * Set viewer element
      * @param {HTMLElement|String} element - Viewer element or ID
      */
-    function setViewerElement(element) {
+    setViewerElement(element) {
       if (typeof element === 'string') {
         viewerElement = document.getElementById(element);
       } else {
@@ -93,7 +101,7 @@ const WynzioWebRTC = (function() {
         
         // Add mouse event listeners if controls enabled
         if (controlsEnabled) {
-          setupMouseControls();
+          this.setupMouseControls();
         }
       }
     }
@@ -101,18 +109,30 @@ const WynzioWebRTC = (function() {
     /**
      * Set up socket event handlers
      */
-    function setupSocketHandlers() {
+    setupSocketHandlers() {
       // Handle WebRTC signaling
-      socket.on('offer', handleOffer);
-      socket.on('answer', handleAnswer);
-      socket.on('ice-candidate', handleIceCandidate);
-      socket.on('control-response', handleControlResponse);
+      socket.on('offer', this.handleOffer.bind(this));
+      socket.on('answer', this.handleAnswer.bind(this));
+      socket.on('ice-candidate', this.handleIceCandidate.bind(this));
+      socket.on('control-response', this.handleControlResponse.bind(this));
+      
+      // Handle message events (general purpose messaging)
+      socket.on('message', (data) => {
+        // Route based on message type
+        if (data.type === 'offer') {
+          this.handleOffer(data);
+        } else if (data.type === 'answer') {
+          this.handleAnswer(data);
+        } else if (data.type === 'ice-candidate') {
+          this.handleIceCandidate(data);
+        }
+      });
       
       // Handle connection status updates
       socket.on('device-status-update', (data) => {
         if (data.deviceId === deviceId && data.status !== 'online' && isConnected) {
           // Device went offline or idle while connected
-          disconnect();
+          this.disconnect();
           connectionCallbacks.onDisconnected('Device went offline');
         }
       });
@@ -123,7 +143,7 @@ const WynzioWebRTC = (function() {
      * @param {String} targetDeviceId - Device ID to connect to
      * @returns {Promise} Connection result
      */
-    function connect(targetDeviceId) {
+    async connect(targetDeviceId) {
       return new Promise(async (resolve, reject) => {
         try {
           // Validate requirements
@@ -146,7 +166,7 @@ const WynzioWebRTC = (function() {
           
           // Disconnect if already connected
           if (isConnected) {
-            await disconnect();
+            await this.disconnect();
           }
           
           // Notify connecting
@@ -156,9 +176,9 @@ const WynzioWebRTC = (function() {
           peerConnection = new RTCPeerConnection(config);
           
           // Set up event handlers
-          peerConnection.ontrack = handleTrack;
-          peerConnection.onicecandidate = handleLocalIceCandidate;
-          peerConnection.oniceconnectionstatechange = handleIceConnectionStateChange;
+          peerConnection.ontrack = this.handleTrack.bind(this);
+          peerConnection.onicecandidate = this.handleLocalIceCandidate.bind(this);
+          peerConnection.oniceconnectionstatechange = this.handleIceConnectionStateChange.bind(this);
           
           // Create data channel for control commands
           dataChannel = peerConnection.createDataChannel('control', {
@@ -177,7 +197,7 @@ const WynzioWebRTC = (function() {
             console.error('Data channel error:', error);
           };
           
-          // Create offer
+          // Create offer - match the format used by Windows app
           const offer = await peerConnection.createOffer({
             offerToReceiveAudio: false,
             offerToReceiveVideo: true
@@ -186,16 +206,19 @@ const WynzioWebRTC = (function() {
           // Set local description
           await peerConnection.setLocalDescription(offer);
           
-          // Send offer to device
+          // Send offer to device - format matches WindowsApp
           socket.emit('offer', {
             targetId: deviceId,
-            offer: peerConnection.localDescription
+            offer: {
+              sdp: peerConnection.localDescription.sdp,
+              type: peerConnection.localDescription.type
+            }
           });
           
           // Resolve promise with connection methods
           resolve({
-            disconnect,
-            sendControlCommand
+            disconnect: this.disconnect.bind(this),
+            sendControlCommand: this.sendControlCommand.bind(this)
           });
         } catch (error) {
           console.error('Connection error:', error);
@@ -208,7 +231,7 @@ const WynzioWebRTC = (function() {
     /**
      * Disconnect from device
      */
-    async function disconnect() {
+    async disconnect() {
       try {
         // Close peer connection
         if (peerConnection) {
@@ -255,22 +278,50 @@ const WynzioWebRTC = (function() {
      * Handle incoming WebRTC offer
      * @param {Object} data - Offer data
      */
-    async function handleOffer(data) {
+    async handleOffer(data) {
       try {
-        // Skip if not for this client
-        if (data.deviceId !== deviceId) {
+        // Extract offer from different possible formats
+        let offerSdp, offerType, fromId;
+        
+        // Format 1: { deviceId, offer: { sdp, type } }
+        if (data.deviceId && data.offer) {
+          offerSdp = data.offer.sdp;
+          offerType = data.offer.type;
+          fromId = data.deviceId;
+        }
+        // Format 2: { from, to, payload: { sdp, type } }
+        else if (data.from && data.to && data.payload) {
+          offerSdp = data.payload.sdp;
+          offerType = data.payload.type;
+          fromId = data.from;
+        }
+        // Invalid format
+        else {
+          throw new Error('Invalid offer format');
+        }
+        
+        // Skip if not for this client or from wrong device
+        if (fromId !== deviceId) {
           return;
         }
         
         // Create answer
-        await peerConnection.setRemoteDescription(data.offer);
+        const offerDesc = new RTCSessionDescription({
+          sdp: offerSdp,
+          type: offerType
+        });
+        
+        await peerConnection.setRemoteDescription(offerDesc);
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
         
-        // Send answer
+        // Send answer - format matches WindowsApp
         socket.emit('answer', {
           targetId: deviceId,
-          answer: peerConnection.localDescription
+          answer: {
+            sdp: peerConnection.localDescription.sdp,
+            type: peerConnection.localDescription.type
+          }
         });
       } catch (error) {
         console.error('Error handling offer:', error);
@@ -282,15 +333,40 @@ const WynzioWebRTC = (function() {
      * Handle incoming WebRTC answer
      * @param {Object} data - Answer data
      */
-    async function handleAnswer(data) {
+    async handleAnswer(data) {
       try {
-        // Skip if not for this client
-        if (data.deviceId !== deviceId) {
+        // Extract answer from different possible formats
+        let answerSdp, answerType, fromId;
+        
+        // Format 1: { deviceId, answer: { sdp, type } }
+        if (data.deviceId && data.answer) {
+          answerSdp = data.answer.sdp;
+          answerType = data.answer.type;
+          fromId = data.deviceId;
+        }
+        // Format 2: { from, to, payload: { sdp, type } }
+        else if (data.from && data.to && data.payload) {
+          answerSdp = data.payload.sdp;
+          answerType = data.payload.type;
+          fromId = data.from;
+        }
+        // Invalid format
+        else {
+          throw new Error('Invalid answer format');
+        }
+        
+        // Skip if not for this client or from wrong device
+        if (fromId !== deviceId) {
           return;
         }
         
         // Set remote description
-        await peerConnection.setRemoteDescription(data.answer);
+        const answerDesc = new RTCSessionDescription({
+          sdp: answerSdp,
+          type: answerType
+        });
+        
+        await peerConnection.setRemoteDescription(answerDesc);
       } catch (error) {
         console.error('Error handling answer:', error);
         connectionCallbacks.onError('Failed to process answer: ' + error.message);
@@ -301,16 +377,40 @@ const WynzioWebRTC = (function() {
      * Handle incoming ICE candidate
      * @param {Object} data - ICE candidate data
      */
-    async function handleIceCandidate(data) {
+    async handleIceCandidate(data) {
       try {
-        // Skip if not for this client
-        if (data.deviceId !== deviceId) {
+        // Extract candidate from different possible formats
+        let candidateObj, fromId;
+        
+        // Format 1: { deviceId, candidate: { candidate, sdpMLineIndex, sdpMid } }
+        if (data.deviceId && data.candidate) {
+          candidateObj = data.candidate;
+          fromId = data.deviceId;
+        }
+        // Format 2: { from, to, payload: { candidate, sdpMLineIndex, sdpMid } }
+        else if (data.from && data.to && data.payload) {
+          candidateObj = data.payload;
+          fromId = data.from;
+        }
+        // Invalid format
+        else {
+          return; // Silently ignore invalid formats
+        }
+        
+        // Skip if not for this client or from wrong device
+        if (fromId !== deviceId) {
           return;
         }
         
-        // Add ice candidate
-        if (data.candidate) {
-          await peerConnection.addIceCandidate(data.candidate);
+        // Add ice candidate if valid
+        if (candidateObj && candidateObj.candidate) {
+          const candidate = new RTCIceCandidate({
+            candidate: candidateObj.candidate,
+            sdpMLineIndex: candidateObj.sdpMLineIndex,
+            sdpMid: candidateObj.sdpMid
+          });
+          
+          await peerConnection.addIceCandidate(candidate);
         }
       } catch (error) {
         console.error('Error handling ICE candidate:', error);
@@ -321,11 +421,16 @@ const WynzioWebRTC = (function() {
      * Handle local ICE candidate
      * @param {Object} event - ICE candidate event
      */
-    function handleLocalIceCandidate(event) {
+    handleLocalIceCandidate(event) {
       if (event.candidate) {
+        // Send ICE candidate to peer - format matches Windows app
         socket.emit('ice-candidate', {
           targetId: deviceId,
-          candidate: event.candidate
+          candidate: {
+            candidate: event.candidate.candidate,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+            sdpMid: event.candidate.sdpMid
+          }
         });
       }
     }
@@ -333,7 +438,7 @@ const WynzioWebRTC = (function() {
     /**
      * Handle ICE connection state change
      */
-    function handleIceConnectionStateChange() {
+    handleIceConnectionStateChange() {
       if (!peerConnection) return;
       
       const state = peerConnection.iceConnectionState;
@@ -362,7 +467,7 @@ const WynzioWebRTC = (function() {
      * Handle remote track
      * @param {Object} event - Track event
      */
-    function handleTrack(event) {
+    handleTrack(event) {
       if (streamElement && event.streams && event.streams[0]) {
         streamElement.srcObject = event.streams[0];
       }
@@ -372,7 +477,7 @@ const WynzioWebRTC = (function() {
      * Handle control response
      * @param {Object} data - Control response data
      */
-    function handleControlResponse(data) {
+    handleControlResponse(data) {
       // Skip if not for this client or request
       if (data.deviceId !== deviceId) {
         return;
@@ -383,11 +488,11 @@ const WynzioWebRTC = (function() {
         
         // Enable controls if not already enabled
         if (!controlsEnabled) {
-          enableControls();
+          this.enableControls();
         }
       } else {
         console.log('Control access denied');
-        disableControls();
+        this.disableControls();
         connectionCallbacks.onError('Remote control access denied');
       }
     }
@@ -395,76 +500,96 @@ const WynzioWebRTC = (function() {
     /**
      * Enable mouse controls
      */
-    function enableControls() {
+    enableControls() {
       if (!viewerElement || !streamElement) return;
       
       controlsEnabled = true;
-      setupMouseControls();
+      this.setupMouseControls();
     }
     
     /**
      * Disable mouse controls
      */
-    function disableControls() {
+    disableControls() {
       if (!viewerElement || !streamElement) return;
       
       controlsEnabled = false;
-      removeMouseControls();
+      this.removeMouseControls();
     }
     
     /**
      * Set up mouse control event listeners
      */
-    function setupMouseControls() {
+    setupMouseControls() {
       if (!viewerElement || !streamElement) return;
       
       // Remove existing listeners
-      removeMouseControls();
+      this.removeMouseControls();
       
       // Add mouse event listeners
-      streamElement.addEventListener('mousedown', handleMouseDown);
-      streamElement.addEventListener('mouseup', handleMouseUp);
-      streamElement.addEventListener('mousemove', handleMouseMove);
-      streamElement.addEventListener('wheel', handleMouseWheel);
-      streamElement.addEventListener('contextmenu', handleContextMenu);
+      streamElement.addEventListener('mousedown', this.handleMouseDown);
+      streamElement.addEventListener('mouseup', this.handleMouseUp);
+      streamElement.addEventListener('mousemove', this.handleMouseMove);
+      streamElement.addEventListener('wheel', this.handleMouseWheel);
+      streamElement.addEventListener('contextmenu', this.handleContextMenu);
+      
+      // Add keyboard event listeners to document
+      document.addEventListener('keydown', this.handleKeyDown);
+      document.addEventListener('keyup', this.handleKeyUp);
       
       // Add touch event listeners for mobile
-      streamElement.addEventListener('touchstart', handleTouchStart);
-      streamElement.addEventListener('touchend', handleTouchEnd);
-      streamElement.addEventListener('touchmove', handleTouchMove);
+      streamElement.addEventListener('touchstart', this.handleTouchStart);
+      streamElement.addEventListener('touchend', this.handleTouchEnd);
+      streamElement.addEventListener('touchmove', this.handleTouchMove);
     }
     
     /**
      * Remove mouse control event listeners
      */
-    function removeMouseControls() {
+    removeMouseControls() {
       if (!viewerElement || !streamElement) return;
       
       // Remove mouse event listeners
-      streamElement.removeEventListener('mousedown', handleMouseDown);
-      streamElement.removeEventListener('mouseup', handleMouseUp);
-      streamElement.removeEventListener('mousemove', handleMouseMove);
-      streamElement.removeEventListener('wheel', handleMouseWheel);
-      streamElement.removeEventListener('contextmenu', handleContextMenu);
+      streamElement.removeEventListener('mousedown', this.handleMouseDown);
+      streamElement.removeEventListener('mouseup', this.handleMouseUp);
+      streamElement.removeEventListener('mousemove', this.handleMouseMove);
+      streamElement.removeEventListener('wheel', this.handleMouseWheel);
+      streamElement.removeEventListener('contextmenu', this.handleContextMenu);
+      
+      // Remove keyboard event listeners
+      document.removeEventListener('keydown', this.handleKeyDown);
+      document.removeEventListener('keyup', this.handleKeyUp);
       
       // Remove touch event listeners
-      streamElement.removeEventListener('touchstart', handleTouchStart);
-      streamElement.removeEventListener('touchend', handleTouchEnd);
-      streamElement.removeEventListener('touchmove', handleTouchMove);
+      streamElement.removeEventListener('touchstart', this.handleTouchStart);
+      streamElement.removeEventListener('touchend', this.handleTouchEnd);
+      streamElement.removeEventListener('touchmove', this.handleTouchMove);
     }
     
     /**
      * Send control command to device
+     * Format exactly matches Windows app InputService.cs expectations
      * @param {Object} command - Control command
      */
-    function sendControlCommand(command) {
-      if (!isConnected || !dataChannel || dataChannel.readyState !== 'open') {
-        console.warn('Cannot send control command: Data channel not open');
+    sendControlCommand(command) {
+      if (!isConnected) {
+        console.warn('Cannot send control command: not connected');
         return false;
       }
       
       try {
-        dataChannel.send(JSON.stringify(command));
+        // Send through data channel if available
+        if (dataChannel && dataChannel.readyState === 'open') {
+          dataChannel.send(JSON.stringify(command));
+          return true;
+        }
+        
+        // Fall back to signaling channel if data channel isn't available
+        socket.emit('control-command', {
+          deviceId: deviceId,
+          command: command
+        });
+        
         return true;
       } catch (error) {
         console.error('Error sending control command:', error);
@@ -477,7 +602,7 @@ const WynzioWebRTC = (function() {
      * @param {Event} event - Mouse or touch event
      * @returns {Object} Normalized coordinates
      */
-    function getNormalizedCoordinates(event) {
+    getNormalizedCoordinates(event) {
       const rect = streamElement.getBoundingClientRect();
       const scaleX = streamElement.videoWidth / rect.width;
       const scaleY = streamElement.videoHeight / rect.height;
@@ -504,206 +629,217 @@ const WynzioWebRTC = (function() {
         y: Math.round(y)
       };
     }
+  }
+  
+  // Event handlers - defined as properties of the prototype
+  WebRTCClient.prototype.handleMouseDown = function(event) {
+    if (!controlsEnabled || !isConnected) return;
+    event.preventDefault();
     
-    /**
-     * Handle mouse down event
-     * @param {Event} event - Mouse event
-     */
-    function handleMouseDown(event) {
-      if (!controlsEnabled || !isConnected) return;
-      event.preventDefault();
-      
-      const coords = getNormalizedCoordinates(event);
-      if (!coords) return;
-      
-      let button;
-      switch (event.button) {
-        case 0: button = 'left'; break;
-        case 1: button = 'middle'; break;
-        case 2: button = 'right'; break;
-        default: button = 'left';
-      }
-      
-      sendControlCommand({
-        type: 'mouse',
-        action: 'down',
+    const coords = instance.getNormalizedCoordinates(event);
+    if (!coords) return;
+    
+    let button;
+    switch (event.button) {
+      case 0: button = 'Left'; break;
+      case 1: button = 'Middle'; break;
+      case 2: button = 'Right'; break;
+      default: button = 'Left';
+    }
+    
+    // Format matches Windows InputService.cs
+    instance.sendControlCommand({
+      type: "MouseDown",
+      button: button,
+      x: coords.x,
+      y: coords.y
+    });
+  };
+  
+  WebRTCClient.prototype.handleMouseUp = function(event) {
+    if (!controlsEnabled || !isConnected) return;
+    event.preventDefault();
+    
+    const coords = instance.getNormalizedCoordinates(event);
+    if (!coords) return;
+    
+    let button;
+    switch (event.button) {
+      case 0: button = 'Left'; break;
+      case 1: button = 'Middle'; break;
+      case 2: button = 'Right'; break;
+      default: button = 'Left';
+    }
+    
+    // Format matches Windows InputService.cs
+    instance.sendControlCommand({
+      type: "MouseUp",
+      button: button,
+      x: coords.x,
+      y: coords.y
+    });
+  };
+  
+  WebRTCClient.prototype.handleMouseMove = function(event) {
+    if (!controlsEnabled || !isConnected) return;
+    
+    const coords = instance.getNormalizedCoordinates(event);
+    if (!coords) return;
+    
+    // Throttle mouse move events to reduce load
+    if (!instance.handleMouseMove.lastSent || Date.now() - instance.handleMouseMove.lastSent > 20) {
+      // Format matches Windows InputService.cs
+      instance.sendControlCommand({
+        type: "MouseMove",
         x: coords.x,
         y: coords.y,
-        button,
         isRelative: false
       });
+      
+      instance.handleMouseMove.lastSent = Date.now();
+    }
+  };
+  
+  WebRTCClient.prototype.handleMouseWheel = function(event) {
+    if (!controlsEnabled || !isConnected) return;
+    event.preventDefault();
+    
+    const delta = Math.sign(event.deltaY) * -1; // Invert delta for natural scrolling
+    
+    // Format matches Windows InputService.cs
+    instance.sendControlCommand({
+      type: "MouseScroll",
+      scrollDelta: delta * 120 // Match Windows wheel delta
+    });
+  };
+  
+  WebRTCClient.prototype.handleContextMenu = function(event) {
+    if (!controlsEnabled || !isConnected) return;
+    event.preventDefault(); // Prevent browser context menu
+  };
+  
+  WebRTCClient.prototype.handleKeyDown = function(event) {
+    if (!controlsEnabled || !isConnected) return;
+    
+    // Focus is on the viewer element or its within the document
+    if (!event.target.closest('#screen-view') && event.target !== document.documentElement) {
+      return;
     }
     
-    /**
-     * Handle mouse up event
-     * @param {Event} event - Mouse event
-     */
-    function handleMouseUp(event) {
-      if (!controlsEnabled || !isConnected) return;
-      event.preventDefault();
-      
-      const coords = getNormalizedCoordinates(event);
-      if (!coords) return;
-      
-      let button;
-      switch (event.button) {
-        case 0: button = 'left'; break;
-        case 1: button = 'middle'; break;
-        case 2: button = 'right'; break;
-        default: button = 'left';
-      }
-      
-      sendControlCommand({
-        type: 'mouse',
-        action: 'up',
-        x: coords.x,
-        y: coords.y,
-        button,
-        isRelative: false
-      });
+    // Ignore modifier key events
+    if (event.key === 'Control' || event.key === 'Alt' || event.key === 'Shift' || event.key === 'Meta') {
+      return;
     }
     
-    /**
-     * Handle mouse move event
-     * @param {Event} event - Mouse event
-     */
-    function handleMouseMove(event) {
-      if (!controlsEnabled || !isConnected) return;
-      
-      const coords = getNormalizedCoordinates(event);
-      if (!coords) return;
-      
-      // Throttle mouse move events to reduce load
-      if (!handleMouseMove.lastSent || Date.now() - handleMouseMove.lastSent > 20) {
-        sendControlCommand({
-          type: 'mouse',
-          action: 'move',
-          x: coords.x,
-          y: coords.y,
-          isRelative: false
-        });
-        
-        handleMouseMove.lastSent = Date.now();
-      }
+    // Format matches Windows InputService.cs
+    instance.sendControlCommand({
+      type: "KeyDown",
+      keyCode: event.keyCode
+    });
+  };
+  
+  WebRTCClient.prototype.handleKeyUp = function(event) {
+    if (!controlsEnabled || !isConnected) return;
+    
+    // Focus is on the viewer element or its within the document
+    if (!event.target.closest('#screen-view') && event.target !== document.documentElement) {
+      return;
     }
     
-    /**
-     * Handle mouse wheel event
-     * @param {Event} event - Wheel event
-     */
-    function handleMouseWheel(event) {
-      if (!controlsEnabled || !isConnected) return;
-      event.preventDefault();
-      
-      const delta = Math.sign(event.deltaY) * -1; // Invert delta for natural scrolling
-      
-      sendControlCommand({
-        type: 'mouse',
-        action: 'scroll',
-        scrollDelta: delta
-      });
+    // Ignore modifier key events
+    if (event.key === 'Control' || event.key === 'Alt' || event.key === 'Shift' || event.key === 'Meta') {
+      return;
     }
     
-    /**
-     * Handle context menu event (right click)
-     * @param {Event} event - Context menu event
-     */
-    function handleContextMenu(event) {
-      if (!controlsEnabled || !isConnected) return;
-      event.preventDefault(); // Prevent browser context menu
-    }
+    // Format matches Windows InputService.cs
+    instance.sendControlCommand({
+      type: "KeyUp",
+      keyCode: event.keyCode
+    });
+  };
+  
+  WebRTCClient.prototype.handleTouchStart = function(event) {
+    if (!controlsEnabled || !isConnected) return;
+    event.preventDefault();
     
-    /**
-     * Handle touch start event
-     * @param {Event} event - Touch event
-     */
-    function handleTouchStart(event) {
-      if (!controlsEnabled || !isConnected) return;
-      event.preventDefault();
-      
-      // Store touch start time for detecting long press
-      handleTouchStart.startTime = Date.now();
-      handleTouchStart.startPosition = {
-        x: event.touches[0].clientX,
-        y: event.touches[0].clientY
-      };
-      
-      // Check if multiple touches (simulated right click)
-      const button = event.touches.length > 1 ? 'right' : 'left';
-      
-      const coords = getNormalizedCoordinates(event);
-      if (!coords) return;
-      
-      sendControlCommand({
-        type: 'mouse',
-        action: 'down',
-        x: coords.x,
-        y: coords.y,
-        button,
-        isRelative: false
-      });
-    }
-    
-    /**
-     * Handle touch end event
-     * @param {Event} event - Touch event
-     */
-    function handleTouchEnd(event) {
-      if (!controlsEnabled || !isConnected) return;
-      event.preventDefault();
-      
-      // Calculate touch duration for long press detection
-      const duration = Date.now() - (handleTouchStart.startTime || 0);
-      const button = duration > 500 ? 'right' : 'left'; // Long press as right click
-      
-      // Use the last known coordinates since there are no coordinates in touchend
-      const coords = getNormalizedCoordinates({
-        type: 'touch',
-        touches: [{
-          clientX: handleTouchStart.startPosition?.x || 0,
-          clientY: handleTouchStart.startPosition?.y || 0
-        }]
-      });
-      
-      if (!coords) return;
-      
-      sendControlCommand({
-        type: 'mouse',
-        action: 'up',
-        x: coords.x,
-        y: coords.y,
-        button,
-        isRelative: false
-      });
-    }
-    
-    /**
-     * Handle touch move event
-     * @param {Event} event - Touch event
-     */
-    function handleTouchMove(event) {
-      if (!controlsEnabled || !isConnected) return;
-      event.preventDefault();
-      
-      const coords = getNormalizedCoordinates(event);
-      if (!coords) return;
-      
-      // Throttle touch move events to reduce load
-      if (!handleTouchMove.lastSent || Date.now() - handleTouchMove.lastSent > 50) {
-        sendControlCommand({
-          type: 'mouse',
-          action: 'move',
-          x: coords.x,
-          y: coords.y,
-          isRelative: false
-        });
-        
-        handleTouchMove.lastSent = Date.now();
-      }
-    }
-    
-    // Public API
-    return {
-      initialize
+    // Store touch start time for detecting long press
+    instance.handleTouchStart.startTime = Date.now();
+    instance.handleTouchStart.startPosition = {
+      x: event.touches[0].clientX,
+      y: event.touches[0].clientY
     };
-  })();
+    
+    // Check if multiple touches (simulated right click)
+    const button = event.touches.length > 1 ? 'Right' : 'Left';
+    
+    const coords = instance.getNormalizedCoordinates(event);
+    if (!coords) return;
+    
+    // Format matches Windows InputService.cs
+    instance.sendControlCommand({
+      type: "MouseDown",
+      button: button,
+      x: coords.x,
+      y: coords.y
+    });
+  };
+  
+  WebRTCClient.prototype.handleTouchEnd = function(event) {
+    if (!controlsEnabled || !isConnected) return;
+    event.preventDefault();
+    
+    // Calculate touch duration for long press detection
+    const duration = Date.now() - (instance.handleTouchStart.startTime || 0);
+    const button = duration > 500 ? 'Right' : 'Left'; // Long press as right click
+    
+    // Use the last known coordinates since there are no coordinates in touchend
+    const coords = instance.getNormalizedCoordinates({
+      type: 'touch',
+      touches: [{
+        clientX: instance.handleTouchStart.startPosition?.x || 0,
+        clientY: instance.handleTouchStart.startPosition?.y || 0
+      }]
+    });
+    
+    if (!coords) return;
+    
+    // Format matches Windows InputService.cs
+    instance.sendControlCommand({
+      type: "MouseUp",
+      button: button,
+      x: coords.x,
+      y: coords.y
+    });
+  };
+  
+  WebRTCClient.prototype.handleTouchMove = function(event) {
+    if (!controlsEnabled || !isConnected) return;
+    event.preventDefault();
+    
+    const coords = instance.getNormalizedCoordinates(event);
+    if (!coords) return;
+    
+    // Throttle touch move events to reduce load
+    if (!instance.handleTouchMove.lastSent || Date.now() - instance.handleTouchMove.lastSent > 50) {
+      // Format matches Windows InputService.cs
+      instance.sendControlCommand({
+        type: "MouseMove",
+        x: coords.x,
+        y: coords.y,
+        isRelative: false
+      });
+      
+      instance.handleTouchMove.lastSent = Date.now();
+    }
+  };
+  
+  // Create and return singleton instance
+  return {
+    initialize: function(options) {
+      if (!instance) {
+        instance = new WebRTCClient();
+      }
+      return instance.initialize(options);
+    }
+  };
+})();
