@@ -280,7 +280,7 @@ class DeviceManager {
       const now = new Date();
       const timeSinceLastSeen = now - lastSeen;
       
-      // Determine status based on thresholds
+      // Determine status based on thresholds - aligned with Windows app
       let newStatus = device.status;
       
       if (timeSinceLastSeen > OFFLINE_THRESHOLD) {

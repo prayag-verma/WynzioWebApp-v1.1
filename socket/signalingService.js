@@ -14,6 +14,7 @@ const config = require('../config/app');
 const DEVICE_DATA_DIR = path.join(__dirname, '../data/devices');
 const CLIENT_TIMEOUT = 30000; // 30 seconds
 const HEARTBEAT_INTERVAL = 25000; // 25 seconds - matching Windows app default
+const PING_TIMEOUT = 20000; // 20 seconds - matching Windows app default
 const RECONNECT_BASE_DELAY = 2000; // Base delay for exponential backoff (ms)
 const MAX_RECONNECT_ATTEMPTS = 5; // Match Windows app setting
 const SESSION_TIMEOUT = 24 * 60 * 60 * 1000; // 24 hours to match Windows app SessionManager.cs exactly
@@ -55,7 +56,7 @@ class SignalingService {
         origin: "*",
         methods: ["GET", "POST"]
       },
-      pingTimeout: 20000, // Match Windows app settings
+      pingTimeout: PING_TIMEOUT, // Match Windows app settings
       pingInterval: HEARTBEAT_INTERVAL, // Match Windows app settings
       // Allow transport polling and websocket to match Windows app
       transports: ['polling', 'websocket'],
@@ -951,7 +952,33 @@ class SignalingService {
    */
   isSessionValid(sid) {
     const expiration = this.sessionExpirations.get(sid);
-    return expiration !== undefined && Date.now() < expiration;
+    if (expiration !== undefined && Date.now() < expiration) {
+      return true;
+    }
+    
+    // If not found in internal map, check for standard 24-hour validity
+    // from the session timestamp (matching Windows app exactly)
+    try {
+      // Try to parse sid as a session object (in case it's saved as string)
+      let sessionObj;
+      
+      try {
+        sessionObj = JSON.parse(sid);
+      } catch (e) {
+        // Not a JSON string, use as is
+        sessionObj = null;
+      }
+      
+      // If we have a timestamp (from SessionManager.cs format)
+      if (sessionObj && sessionObj.timestamp) {
+        const timestamp = parseInt(sessionObj.timestamp);
+        return !isNaN(timestamp) && (Date.now() - timestamp < SESSION_TIMEOUT);
+      }
+    } catch (e) {
+      logger.debug(`Error checking session validity: ${e.message}`);
+    }
+    
+    return false;
   }
   
   /**

@@ -12,9 +12,10 @@ const deviceManager = require('./deviceManager');
 // Constants
 const HEALTH_DATA_DIR = path.join(__dirname, '../../data/health');
 const MONITOR_INTERVAL = 60000; // 1 minute
+// Status thresholds aligned exactly with Windows app (ConnectionSettings.cs)
 const STATUS_THRESHOLDS = {
-  OFFLINE: 300000, // 5 minutes - matches Windows app setting
-  IDLE: 60000      // 1 minute - matches Windows app setting
+  OFFLINE: 300000, // 5 minutes (300000ms) - matches Windows app setting
+  IDLE: 60000      // 1 minute (60000ms) - matches Windows app setting
 };
 
 // Ensure health data directory exists
@@ -50,7 +51,9 @@ function startMonitoring(io) {
   const timerId = setInterval(() => monitorAllDevices(io), MONITOR_INTERVAL);
   monitoringTimers.set('global', timerId);
   
-  logger.info('Health monitoring service started');
+  logger.info('Health monitoring service started with thresholds: offline=' + 
+              (STATUS_THRESHOLDS.OFFLINE/1000) + 's, idle=' + 
+              (STATUS_THRESHOLDS.IDLE/1000) + 's');
 }
 
 /**
