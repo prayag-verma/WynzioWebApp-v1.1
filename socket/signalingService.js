@@ -15,7 +15,7 @@ const DEVICE_DATA_DIR = path.join(__dirname, '../data/devices');
 const CLIENT_TIMEOUT = 30000; // 30 seconds
 const HEARTBEAT_INTERVAL = 25000; // 25 seconds - matching Windows app default
 const PING_TIMEOUT = 20000; // 20 seconds - matching Windows app default
-const RECONNECT_BASE_DELAY = 2000; // Base delay for exponential backoff (ms)
+const RECONNECT_BASE_DELAY = 30000; // 30 seconds to match Windows app RECONNECT_INTERVAL
 const MAX_RECONNECT_ATTEMPTS = 5; // Match Windows app setting
 const SESSION_TIMEOUT = 24 * 60 * 60 * 1000; // 24 hours to match Windows app SessionManager.cs exactly
 
@@ -243,8 +243,8 @@ class SignalingService {
       return;
     }
     
-    // Calculate delay with exponential backoff (2^attempt seconds)
-    const delay = RECONNECT_BASE_DELAY * Math.pow(2, attempts);
+    // Use fixed reconnect interval to match Windows app
+    const delay = RECONNECT_BASE_DELAY;
     logger.info(`Scheduling reconnection for ${remotePcId} in ${delay}ms (attempt ${attempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
     
     // Schedule reconnection
@@ -951,15 +951,14 @@ class SignalingService {
    * @returns {boolean} Whether the session is valid
    */
   isSessionValid(sid) {
-    const expiration = this.sessionExpirations.get(sid);
-    if (expiration !== undefined && Date.now() < expiration) {
-      return true;
-    }
-    
-    // If not found in internal map, check for standard 24-hour validity
-    // from the session timestamp (matching Windows app exactly)
     try {
-      // Try to parse sid as a session object (in case it's saved as string)
+      // Check if direct match in session expirations map
+      const expiration = this.sessionExpirations.get(sid);
+      if (expiration !== undefined && Date.now() < expiration) {
+        return true;
+      }
+      
+      // Try to parse sid as a session object (matching Windows app format)
       let sessionObj;
       
       try {
@@ -970,9 +969,12 @@ class SignalingService {
       }
       
       // If we have a timestamp (from SessionManager.cs format)
-      if (sessionObj && sessionObj.timestamp) {
-        const timestamp = parseInt(sessionObj.timestamp);
+      if (sessionObj && sessionObj.Timestamp) {
+        const timestamp = sessionObj.Timestamp;
         return !isNaN(timestamp) && (Date.now() - timestamp < SESSION_TIMEOUT);
+      } else if (sessionObj && sessionObj.Sid) {
+        // Use Sid property directly
+        return this.isSessionValid(sessionObj.Sid);
       }
     } catch (e) {
       logger.debug(`Error checking session validity: ${e.message}`);

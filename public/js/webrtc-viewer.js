@@ -19,10 +19,11 @@ const WynzioWebRTC = (function() {
   let reconnectAttempts = 0;
   let reconnectTimeout = null;
   let connectionMonitorInterval = null;
+  let preferredCodecs = ['VP8']; // Match Windows app VideoCodecsEnum.VP8 restriction
   
   // Reconnection configuration - matches Windows app settings
   const MAX_RECONNECT_ATTEMPTS = 5;  // Match Windows app MaxReconnectAttempts
-  const RECONNECT_BASE_DELAY = 2000; // 2 seconds base delay (matches Windows app)
+  const RECONNECT_BASE_DELAY = 30000; // 30 seconds to match Windows app ConnectionSettings.cs _reconnectInterval
   
   // Configuration - matches Windows app settings in ConnectionSettings.cs
   const config = {
@@ -72,19 +73,48 @@ const WynzioWebRTC = (function() {
    * Added to match Windows app SessionManager.cs
    */
   function storeSessionId(sid, timestamp = Date.now()) {
-    localStorage.setItem('wynzio_session_id', sid);
-    localStorage.setItem('wynzio_session_timestamp', timestamp.toString());
-    console.log('Stored session ID:', sid);
+    try {
+      const sessionData = {
+        Sid: sid,
+        Timestamp: timestamp
+      };
+      localStorage.setItem('wynzio_session_id', JSON.stringify(sessionData));
+      localStorage.setItem('wynzio_session_timestamp', timestamp.toString());
+      console.log('Stored session ID:', sid);
+    } catch (error) {
+      console.error('Error storing session ID:', error);
+    }
   }
   
   function getStoredSessionId() {
-    const sid = localStorage.getItem('wynzio_session_id');
-    const timestamp = parseInt(localStorage.getItem('wynzio_session_timestamp') || '0');
-    
-    // Check if session is still valid (less than 24 hours old) - matching Windows app
-    if (sid && (Date.now() - timestamp < 24 * 60 * 60 * 1000)) {
-      console.log('Using stored session ID:', sid);
-      return sid;
+    try {
+      // Try to load from serialized format first (matches Windows app)
+      const sessionStr = localStorage.getItem('wynzio_session_id');
+      if (!sessionStr) return null;
+      
+      let sessionData;
+      try {
+        // Try to parse as JSON (Windows app SessionManager.cs format)
+        sessionData = JSON.parse(sessionStr);
+        const timestamp = sessionData.Timestamp || parseInt(localStorage.getItem('wynzio_session_timestamp') || '0');
+        
+        // Check if session is still valid (less than 24 hours old) - matching Windows app
+        if (sessionData.Sid && (Date.now() - timestamp < 24 * 60 * 60 * 1000)) {
+          console.log('Using stored session ID:', sessionData.Sid);
+          return sessionData.Sid;
+        }
+      } catch (e) {
+        // Not a JSON object, might be just a string ID
+        const timestamp = parseInt(localStorage.getItem('wynzio_session_timestamp') || '0');
+        
+        // Check if session is still valid (less than 24 hours old) - matching Windows app
+        if (sessionStr && (Date.now() - timestamp < 24 * 60 * 60 * 1000)) {
+          console.log('Using stored session ID (string format):', sessionStr);
+          return sessionStr;
+        }
+      }
+    } catch (error) {
+      console.error('Error retrieving session ID:', error);
     }
     
     console.log('No valid session ID found');
@@ -148,6 +178,11 @@ const WynzioWebRTC = (function() {
       isConnected = false;
       isConnecting = false;
       reconnectAttempts = 0;
+      
+      // Set preferred codecs - matching Windows app VideoEncoderEndPoint settings
+      if (options.preferredCodecs) {
+        preferredCodecs = options.preferredCodecs;
+      }
       
       // Start connection monitoring
       this.startConnectionMonitoring();
@@ -372,6 +407,9 @@ const WynzioWebRTC = (function() {
           // Setup data channel events
           this.setupDataChannel(dataChannel);
           
+          // Apply codec preferences - matching Windows app's VP8 restriction
+          this.applyCodecPreferences(peerConnection);
+          
           // Create offer with configuration matching SIPSorcery in Windows app
           const offer = await peerConnection.createOffer({
             offerToReceiveAudio: false,
@@ -421,6 +459,60 @@ const WynzioWebRTC = (function() {
     }
     
     /**
+     * Apply codec preferences to match Windows app's VideoEncoderEndPoint
+     * @param {RTCPeerConnection} pc - Peer connection
+     */
+    async applyCodecPreferences(pc) {
+      try {
+        // Only proceed if RTCRtpSender.getCapabilities is available
+        if (!RTCRtpSender.getCapabilities) {
+          console.log('RTCRtpSender.getCapabilities not available, skipping codec preferences');
+          return;
+        }
+        
+        // Get available codecs
+        const capabilities = RTCRtpSender.getCapabilities('video');
+        if (!capabilities) {
+          console.log('No video capabilities available');
+          return;
+        }
+        
+        // Filter codecs to prioritize VP8 matching Windows app's VideoEncoderEndPoint.RestrictFormats
+        const preferredCodecsList = capabilities.codecs.filter(codec => {
+          const codecName = codec.mimeType.split('/')[1].toLowerCase();
+          return preferredCodecs.some(preferred => codecName.includes(preferred.toLowerCase()));
+        });
+        
+        if (preferredCodecsList.length === 0) {
+          console.log('No preferred codecs found');
+          return;
+        }
+        
+        // Add the rest of the codecs
+        const otherCodecs = capabilities.codecs.filter(codec => {
+          const codecName = codec.mimeType.split('/')[1].toLowerCase();
+          return !preferredCodecs.some(preferred => codecName.includes(preferred.toLowerCase()));
+        });
+        
+        // Combine preferred codecs first, then others
+        const orderedCodecs = [...preferredCodecsList, ...otherCodecs];
+        
+        // Apply codec preferences to transceiver
+        const transceivers = pc.getTransceivers();
+        for (const transceiver of transceivers) {
+          if (transceiver.sender.track && transceiver.sender.track.kind === 'video' && 
+              transceiver.setCodecPreferences) {
+            transceiver.setCodecPreferences(orderedCodecs);
+            console.log('Applied codec preferences, prioritizing:', preferredCodecs.join(', '));
+            break;
+          }
+        }
+      } catch (error) {
+        console.error('Error applying codec preferences:', error);
+      }
+    }
+    
+    /**
      * Handle connection failure and attempt reconnection
      * @param {String} reason - Failure reason
      */
@@ -435,10 +527,10 @@ const WynzioWebRTC = (function() {
       // Notify disconnection
       connectionCallbacks.onDisconnected(reason);
       
-      // Attempt reconnection with exponential backoff - match Windows app exactly
+      // Attempt reconnection with interval matching Windows app ConnectionSettings.cs
       if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        const delay = RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts);
-        console.log(`Scheduling reconnection attempt ${reconnectAttempts + 1} in ${delay}ms`);
+        // Use fixed 30 second interval to match Windows app ConnectionSettings.cs _reconnectInterval
+        console.log(`Scheduling reconnection attempt ${reconnectAttempts + 1} in ${RECONNECT_BASE_DELAY/1000}s`);
         
         // Clear any existing timeout
         if (reconnectTimeout) {
@@ -451,7 +543,7 @@ const WynzioWebRTC = (function() {
           this.connect(remotePcId).catch(err => {
             console.error('Reconnection attempt failed:', err);
           });
-        }, delay);
+        }, RECONNECT_BASE_DELAY);
       } else {
         console.error('Maximum reconnection attempts reached');
       }
@@ -611,6 +703,9 @@ const WynzioWebRTC = (function() {
           peerConnection.ondatachannel = this.handleDataChannel.bind(this);
         }
         
+        // Apply codec preferences - matching Windows app's VP8 restriction
+        this.applyCodecPreferences(peerConnection);
+        
         // Create RTCSessionDescription for offer
         const offerDesc = new RTCSessionDescription({
           sdp: offerSdp,
@@ -710,9 +805,7 @@ const WynzioWebRTC = (function() {
         else if (data.from && data.to && data.payload) {
           candidateObj = data.payload;
           fromId = data.from;
-        }
-        // Invalid format
-        else {
+        } else {
           return; // Silently ignore invalid formats
         }
         

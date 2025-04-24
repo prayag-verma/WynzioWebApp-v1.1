@@ -16,6 +16,7 @@ let reconnectAttempts = 0;
 let connectionMonitorInterval = null;
 let isConnecting = false;
 const MAX_RECONNECT_ATTEMPTS = 5; // Match Windows app setting
+const RECONNECT_INTERVAL = 30000; // 30 seconds - match Windows app ConnectionSettings.cs _reconnectInterval
 
 /**
  * Get existing client ID from localStorage or create a new one
@@ -53,19 +54,49 @@ function getOrCreateClientId() {
  * Added to match Windows app SessionManager.cs
  */
 function storeSessionId(sid, timestamp = Date.now()) {
-    localStorage.setItem('wynzio_session_id', sid);
-    localStorage.setItem('wynzio_session_timestamp', timestamp.toString());
-    console.log('Stored session ID:', sid);
+    try {
+        // Store session data in the format expected by Windows app SessionManager.cs
+        const sessionData = {
+            Sid: sid,
+            Timestamp: timestamp
+        };
+        localStorage.setItem('wynzio_session_id', JSON.stringify(sessionData));
+        localStorage.setItem('wynzio_session_timestamp', timestamp.toString());
+        console.log('Stored session ID:', sid);
+    } catch (error) {
+        console.error('Error storing session ID:', error);
+    }
 }
 
 function getStoredSessionId() {
-    const sid = localStorage.getItem('wynzio_session_id');
-    const timestamp = parseInt(localStorage.getItem('wynzio_session_timestamp') || '0');
-    
-    // Check if session is still valid (less than 24 hours old) - matching Windows app
-    if (sid && (Date.now() - timestamp < 24 * 60 * 60 * 1000)) {
-        console.log('Using stored session ID:', sid);
-        return sid;
+    try {
+        // Try to load from serialized format first (matches Windows app)
+        const sessionStr = localStorage.getItem('wynzio_session_id');
+        if (!sessionStr) return null;
+        
+        let sessionData;
+        try {
+            // Try to parse as JSON (Windows app SessionManager.cs format)
+            sessionData = JSON.parse(sessionStr);
+            const timestamp = sessionData.Timestamp || parseInt(localStorage.getItem('wynzio_session_timestamp') || '0');
+            
+            // Check if session is still valid (less than 24 hours old) - matching Windows app
+            if (sessionData.Sid && (Date.now() - timestamp < 24 * 60 * 60 * 1000)) {
+                console.log('Using stored session ID:', sessionData.Sid);
+                return sessionData.Sid;
+            }
+        } catch (e) {
+            // Not a JSON object, might be just a string ID
+            const timestamp = parseInt(localStorage.getItem('wynzio_session_timestamp') || '0');
+            
+            // Check if session is still valid (less than 24 hours old) - matching Windows app
+            if (sessionStr && (Date.now() - timestamp < 24 * 60 * 60 * 1000)) {
+                console.log('Using stored session ID (string format):', sessionStr);
+                return sessionStr;
+            }
+        }
+    } catch (error) {
+        console.error('Error retrieving session ID:', error);
     }
     
     console.log('No valid session ID found');
@@ -399,8 +430,8 @@ function initSocketUpdates() {
             },
             reconnection: true,
             reconnectionAttempts: MAX_RECONNECT_ATTEMPTS, // Match Windows app
-            reconnectionDelay: 2000, // Match Windows app RECONNECT_BASE_DELAY
-            reconnectionDelayMax: 10000,
+            reconnectionDelay: RECONNECT_INTERVAL, // Match Windows app RECONNECT_INTERVAL
+            reconnectionDelayMax: RECONNECT_INTERVAL,
             timeout: 20000
         });
         
@@ -658,8 +689,8 @@ async function initViewer(remotePcId) {
             },
             reconnection: true,
             reconnectionAttempts: MAX_RECONNECT_ATTEMPTS,
-            reconnectionDelay: 2000, // Match Windows app
-            reconnectionDelayMax: 10000,
+            reconnectionDelay: RECONNECT_INTERVAL, // Match Windows app
+            reconnectionDelayMax: RECONNECT_INTERVAL,
             timeout: 20000
         });
         
@@ -685,13 +716,14 @@ async function initViewer(remotePcId) {
             viewerSocket.on('connect', () => clearTimeout(timeout));
         });
         
-        // Initialize WebRTC client - MODIFIED TO ALWAYS ENABLE CONTROLS
+        // Initialize WebRTC client - MODIFIED TO ALWAYS ENABLE CONTROLS & SPECIFY VP8 CODEC
         rtcClient = WynzioWebRTC.initialize({
             socket: viewerSocket,
             viewerElement: 'screen-view',
             remotePcId: remotePcId,
             clientId: clientId, // Use the persistent client ID
             enableControls: true, // Always enable controls - no permission needed
+            preferredCodecs: ['VP8'], // Match Windows app VideoEncoderEndPoint VP8 restriction
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' }
             ],
@@ -738,8 +770,9 @@ async function initViewer(remotePcId) {
                 
                 // If not max reconnection attempts, try to reconnect
                 if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                    const delay = 2000 * Math.pow(2, reconnectAttempts);
-                    console.log(`Scheduling reconnection attempt ${reconnectAttempts + 1} in ${delay}ms`);
+                    // Use fixed 30-second interval to match Windows app ConnectionSettings.cs
+                    const delay = RECONNECT_INTERVAL;
+                    console.log(`Scheduling reconnection attempt ${reconnectAttempts + 1} in ${delay/1000}s`);
                     
                     setTimeout(() => {
                         reconnectAttempts++;
