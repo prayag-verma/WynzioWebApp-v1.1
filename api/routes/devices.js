@@ -1,5 +1,6 @@
 /**
  * Device API routes
+ * Updated to use remotePcId consistently with Windows app
  */
 const express = require('express');
 const router = express.Router();
@@ -37,44 +38,44 @@ router.get('/online',
 );
 
 /**
- * @route GET /api/devices/:deviceId
- * @desc Get device by ID
+ * @route GET /api/devices/:remotePcId
+ * @desc Get device by remotePcId
  * @access Private
  */
-router.get('/:deviceId', 
+router.get('/:remotePcId', 
   authMiddleware, 
   rbacMiddleware([], ['view:devices']), 
   deviceController.getDeviceById
 );
 
 /**
- * @route GET /api/devices/:deviceId/health
+ * @route GET /api/devices/:remotePcId/health
  * @desc Get device health
  * @access Private
  */
-router.get('/:deviceId/health', 
+router.get('/:remotePcId/health', 
   authMiddleware, 
   rbacMiddleware([], ['view:devices']), 
   deviceController.getDeviceHealth
 );
 
 /**
- * @route GET /api/devices/:deviceId/logs
+ * @route GET /api/devices/:remotePcId/logs
  * @desc Get device logs
  * @access Private (admin)
  */
-router.get('/:deviceId/logs', 
+router.get('/:remotePcId/logs', 
   authMiddleware, 
   rbacMiddleware(['admin'], ['view:logs']), 
   deviceController.getDeviceLogs
 );
 
 /**
- * @route POST /api/devices/:deviceId/connect
+ * @route POST /api/devices/:remotePcId/connect
  * @desc Initiate connection to device
  * @access Private
  */
-router.post('/:deviceId/connect', 
+router.post('/:remotePcId/connect', 
   authMiddleware, 
   rbacMiddleware([], ['control:devices']), 
   deviceController.initiateConnection

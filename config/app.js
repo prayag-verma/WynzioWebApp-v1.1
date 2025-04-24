@@ -15,8 +15,8 @@ const AppConfig = (function() {
         loginPath: '/login',
         dashboardPath: '/dashboard',
         
-        // API key for device authentication        
-        deviceApiKey: process.env.DEVICE_API_KEY || '3f7a9b25e8d146c0b2f15a6d90e74c8d',
+        // API key for remote device authentication
+        remoteApiKey: process.env.REMOTE_API_KEY || '3f7a9b25e8d146c0b2f15a6d90e74c8d',
         
         // WebRTC configuration
         webrtc: {
@@ -28,11 +28,20 @@ const AppConfig = (function() {
             useVideo: true
         },
         
+        // Socket.IO connection configuration - updated to match Windows app exactly
+        socketIo: {
+            path: '/signal', // Changed from '/socket.io' to '/signal' to match Windows app
+            pingInterval: parseInt(process.env.SOCKET_PING_INTERVAL || "25000", 10), // 25 seconds - match Windows app
+            pingTimeout: parseInt(process.env.SOCKET_PING_TIMEOUT || "20000", 10), // 20 seconds
+            sessionTimeout: parseInt(process.env.SESSION_TIMEOUT || "86400000", 10), // 24 hours - match Windows app SessionManager.cs
+            reconnectionDelay: parseInt(process.env.RECONNECT_BASE_DELAY || "2000", 10) // 2 seconds - match Windows app
+        },
+        
         // Device monitoring configuration
         monitoring: {
             heartbeatInterval: parseInt(process.env.HEARTBEAT_INTERVAL || "60000", 10), // 1 minute
-            offlineThreshold: parseInt(process.env.OFFLINE_THRESHOLD || "300000", 10), // 5 minutes
-            idleThreshold: parseInt(process.env.IDLE_THRESHOLD || "60000", 10) // 1 minute
+            offlineThreshold: parseInt(process.env.OFFLINE_THRESHOLD || "300000", 10), // 5 minutes - match Windows app
+            idleThreshold: parseInt(process.env.IDLE_THRESHOLD || "60000", 10) // 1 minute - match Windows app
         },
         
         // Data storage configuration
@@ -69,14 +78,15 @@ const AppConfig = (function() {
             defaultRedirectAfterLogout: defaultConfig.defaultRedirectAfterLogout,
             loginPath: defaultConfig.loginPath,
             dashboardPath: defaultConfig.dashboardPath,
-            webrtc: defaultConfig.webrtc
+            webrtc: defaultConfig.webrtc,
+            socketIo: defaultConfig.socketIo
         };
     } else {
         // Node.js environment
         return {
             ...defaultConfig,
             jwtSecret: process.env.JWT_SECRET || defaultConfig.jwtSecret,
-            deviceApiKey: process.env.DEVICE_API_KEY || defaultConfig.deviceApiKey,
+            remoteApiKey: process.env.REMOTE_API_KEY || defaultConfig.remoteApiKey,
             port: process.env.PORT || 3000
         };
     }

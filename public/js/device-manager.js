@@ -1,7 +1,7 @@
 /**
  * device-manager.js
  * Handles device management and remote viewer functionality
- * Modified to align with Windows app expectations
+ * Updated to exactly match Windows app expectations
  */
 
 // Global variables
@@ -17,27 +17,69 @@ let connectionMonitorInterval = null;
 let isConnecting = false;
 const MAX_RECONNECT_ATTEMPTS = 5; // Match Windows app setting
 
-
-
-    /**
-     * Get existing client ID from localStorage or create a new one
-     * @returns {string} Client ID
-     */
-    function getOrCreateClientId() {
-        // Try to get existing client ID from localStorage
-        let storedClientId = localStorage.getItem('wynzio_client_id');
-        
-        // If no client ID exists, generate a new one and store it
-        if (!storedClientId) {
-            storedClientId = 'web-client-' + Date.now();
-            localStorage.setItem('wynzio_client_id', storedClientId);
-            console.log('Created new Web client ID:', storedClientId);
-        } else {
-            console.log('Using existing Web client ID:', storedClientId);
+/**
+ * Get existing client ID from localStorage or create a new one
+ * Updated to match Windows app naming convention
+ * @returns {string} Client ID
+ */
+function getOrCreateClientId() {
+    // Try to get existing client ID first with new name
+    let storedClientId = localStorage.getItem('webClientId');
+    
+    // If not found, try legacy format for backward compatibility
+    if (!storedClientId) {
+        storedClientId = localStorage.getItem('wynzio_client_id');
+        // If found in old format, migrate to new format
+        if (storedClientId) {
+            localStorage.setItem('webClientId', storedClientId);
+            // Keep old key for backward compatibility but future updates will use new key
         }
-        
-        return storedClientId;
     }
+    
+    // If still not found, generate new ID
+    if (!storedClientId) {
+        storedClientId = 'web-client-' + Date.now();
+        localStorage.setItem('webClientId', storedClientId);
+        console.log('Created new Web client ID:', storedClientId);
+    } else {
+        console.log('Using existing Web client ID:', storedClientId);
+    }
+    
+    return storedClientId;
+}
+
+/**
+ * Store and retrieve session data for reuse
+ * Added to match Windows app SessionManager.cs
+ */
+function storeSessionId(sid, timestamp = Date.now()) {
+    localStorage.setItem('wynzio_session_id', sid);
+    localStorage.setItem('wynzio_session_timestamp', timestamp.toString());
+    console.log('Stored session ID:', sid);
+}
+
+function getStoredSessionId() {
+    const sid = localStorage.getItem('wynzio_session_id');
+    const timestamp = parseInt(localStorage.getItem('wynzio_session_timestamp') || '0');
+    
+    // Check if session is still valid (less than 24 hours old) - matching Windows app
+    if (sid && (Date.now() - timestamp < 24 * 60 * 60 * 1000)) {
+        console.log('Using stored session ID:', sid);
+        return sid;
+    }
+    
+    console.log('No valid session ID found');
+    return null;
+}
+
+/**
+ * Clear session data
+ */
+function clearSessionData() {
+    localStorage.removeItem('wynzio_session_id');
+    localStorage.removeItem('wynzio_session_timestamp');
+    console.log('Cleared session data');
+}
 
 document.addEventListener('DOMContentLoaded', async function() {
     try {
@@ -185,7 +227,7 @@ function renderDevices(filteredDevices) {
     filteredDevices.forEach(device => {
         const deviceCard = document.createElement('div');
         deviceCard.className = `device-card ${device.status || 'unknown'}`;
-        deviceCard.dataset.deviceId = device.deviceId;
+        deviceCard.dataset.remotePcId = device.remotePcId;
         
         // Format last seen time
         const lastSeen = device.lastSeen ? formatTimeAgo(new Date(device.lastSeen)) : 'Never';
@@ -195,7 +237,7 @@ function renderDevices(filteredDevices) {
             <div class="device-info">
                 <div class="device-name">
                     <h4>${device.systemName || 'Unknown Device'}</h4>
-                    <span class="device-id">${device.deviceId}</span>
+                    <span class="device-id">${device.remotePcId}</span>
                 </div>
                 <div class="device-status">
                     <span class="status-indicator ${device.status || 'unknown'}"></span>
@@ -223,12 +265,12 @@ function renderDevices(filteredDevices) {
         // Add event listeners
         const connectBtn = deviceCard.querySelector('.connect-btn');
         connectBtn.addEventListener('click', () => {
-            connectToDevice(device.deviceId);
+            connectToDevice(device.remotePcId);
         });
         
         const detailsBtn = deviceCard.querySelector('.view-details-btn');
         detailsBtn.addEventListener('click', () => {
-            viewDeviceDetails(device.deviceId);
+            viewDeviceDetails(device.remotePcId);
         });
         
         // Add to list
@@ -239,7 +281,7 @@ function renderDevices(filteredDevices) {
 /**
  * Connect to device
  */
-function connectToDevice(deviceId) {
+function connectToDevice(remotePcId) {
     // Show remote viewer section
     showRemoteViewerSection();
     
@@ -252,7 +294,7 @@ function connectToDevice(deviceId) {
     reconnectAttempts = 0;
     
     // Initialize viewer
-    initViewer(deviceId);
+    initViewer(remotePcId);
 }
 
 /**
@@ -283,10 +325,10 @@ function showRemoteViewerSection() {
 /**
  * View device details
  */
-function viewDeviceDetails(deviceId) {
+function viewDeviceDetails(remotePcId) {
     // Implement device details modal or page
     // For now, just open connection page
-    connectToDevice(deviceId);
+    connectToDevice(remotePcId);
 }
 
 /**
@@ -341,21 +383,39 @@ function capitalizeFirstLetter(string) {
  */
 function initSocketUpdates() {
     try {
+        // Get stored session ID for reuse if available
+        const sessionId = getStoredSessionId();
+        
         // Connect to Socket.IO server with client ID matching Windows app expectations
         const socket = io('', {
+            path: '/signal', // Updated to match Windows app's SignalingService.cs path
             query: {
                 type: 'dashboard',
                 clientId: clientId // Use the persistent client ID
             },
             auth: {
-                token: Auth.getToken()
+                token: Auth.getToken(),
+                sid: sessionId // Include session ID if available
+            },
+            reconnection: true,
+            reconnectionAttempts: MAX_RECONNECT_ATTEMPTS, // Match Windows app
+            reconnectionDelay: 2000, // Match Windows app RECONNECT_BASE_DELAY
+            reconnectionDelayMax: 10000,
+            timeout: 20000
+        });
+        
+        // Store session ID when received in handshake
+        socket.on('connect', () => {
+            const sid = socket.id;
+            if (sid) {
+                storeSessionId(sid);
             }
         });
         
         // Listen for device status updates
         socket.on('device-status-update', (data) => {
             // Find device in list
-            const deviceIndex = devices.findIndex(d => d.deviceId === data.deviceId);
+            const deviceIndex = devices.findIndex(d => d.remotePcId === data.remotePcId);
             
             if (deviceIndex !== -1) {
                 // Update device status
@@ -363,7 +423,7 @@ function initSocketUpdates() {
                 devices[deviceIndex].lastSeen = data.timestamp;
                 
                 // Update UI if already rendered
-                const deviceCard = document.querySelector(`.device-card[data-device-id="${data.deviceId}"]`);
+                const deviceCard = document.querySelector(`.device-card[data-remotePcId="${data.remotePcId}"]`);
                 if (deviceCard) {
                     // Update status classes
                     deviceCard.className = `device-card ${data.status}`;
@@ -435,16 +495,16 @@ function initSocketUpdates() {
         
         // Listen for reconnection attempts
         socket.on('reconnect-attempt', (data) => {
-            console.log(`Reconnection attempt ${data.attempt} for device ${data.deviceId}`);
+            console.log(`Reconnection attempt ${data.attempt} for device ${data.remotePcId}`);
             
             // If we're currently viewing this device and not already connecting,
             // try to reconnect
             const retryButton = document.getElementById('retry-button');
-            if (retryButton && retryButton.getAttribute('data-device-id') === data.deviceId) {
-                if (!isConnecting && reconnectAttempts < 5) {
+            if (retryButton && retryButton.getAttribute('data-device-id') === data.remotePcId) {
+                if (!isConnecting && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                     console.log('Attempting to reconnect to device...');
                     reconnectAttempts++;
-                    initViewer(data.deviceId);
+                    initViewer(data.remotePcId);
                 }
             }
         });
@@ -501,10 +561,10 @@ function initViewerControls() {
         const retryButton = document.getElementById('retry-button');
         if (retryButton) {
             retryButton.addEventListener('click', function() {
-                const currentDeviceId = retryButton.getAttribute('data-device-id');
-                if (currentDeviceId) {
+                const currentRemotePcId = retryButton.getAttribute('data-device-id');
+                if (currentRemotePcId) {
                     reconnectAttempts = 0; // Reset reconnect attempts
-                    initViewer(currentDeviceId);
+                    initViewer(currentRemotePcId);
                 }
             });
         }
@@ -532,7 +592,7 @@ function startConnectionMonitoring() {
             // Request device status update
             if (viewerSocket) {
                 viewerSocket.emit('device-status-request', {
-                    deviceId: document.getElementById('retry-button').getAttribute('data-device-id')
+                    remotePcId: document.getElementById('retry-button').getAttribute('data-device-id')
                 });
             }
         }
@@ -551,9 +611,9 @@ function stopConnectionMonitoring() {
 
 /**
  * Initialize the remote viewer
- * @param {string} deviceId - Device ID to connect to
+ * @param {string} remotePcId - Device ID to connect to
  */
-async function initViewer(deviceId) {
+async function initViewer(remotePcId) {
     try {
         // Set connecting state
         isConnecting = true;
@@ -574,33 +634,45 @@ async function initViewer(deviceId) {
         
         // Store device ID for retry button
         const retryButton = document.getElementById('retry-button');
-        if (retryButton) retryButton.setAttribute('data-device-id', deviceId);
+        if (retryButton) retryButton.setAttribute('data-device-id', remotePcId);
         
         // Disconnect existing connection if any
         disconnectFromDevice();
         
         // Fetch device information
-        await fetchDeviceInfo(deviceId);
+        await fetchDeviceInfo(remotePcId);
+        
+        // Get stored session ID for reuse if available
+        const sessionId = getStoredSessionId();
         
         // Connect to Socket.IO server with consistent client ID
         viewerSocket = io('', {
+            path: '/signal', // Updated to match Windows app SignalingService.cs
             query: {
                 type: 'dashboard',
                 clientId: clientId // Use the persistent client ID
             },
             auth: {
-                token: Auth.getToken()
+                token: Auth.getToken(),
+                sid: sessionId // Include session ID if available
             },
             reconnection: true,
-            reconnectionAttempts: 5,
-            reconnectionDelay: 1000,
+            reconnectionAttempts: MAX_RECONNECT_ATTEMPTS,
+            reconnectionDelay: 2000, // Match Windows app
             reconnectionDelayMax: 10000,
             timeout: 20000
         });
         
         // Wait for socket connection
         await new Promise((resolve, reject) => {
-            viewerSocket.on('connect', resolve);
+            viewerSocket.on('connect', () => {
+                // Store session ID from connection
+                const sid = viewerSocket.id;
+                if (sid) {
+                    storeSessionId(sid);
+                }
+                resolve();
+            });
             viewerSocket.on('connect_error', reject);
             viewerSocket.on('error', reject);
             
@@ -617,7 +689,7 @@ async function initViewer(deviceId) {
         rtcClient = WynzioWebRTC.initialize({
             socket: viewerSocket,
             viewerElement: 'screen-view',
-            deviceId: deviceId,
+            remotePcId: remotePcId,
             clientId: clientId, // Use the persistent client ID
             enableControls: true, // Always enable controls - no permission needed
             iceServers: [
@@ -665,13 +737,13 @@ async function initViewer(deviceId) {
                 showError('Connection closed: ' + (reason || 'Unknown reason'));
                 
                 // If not max reconnection attempts, try to reconnect
-                if (reconnectAttempts < 5) {
+                if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                     const delay = 2000 * Math.pow(2, reconnectAttempts);
                     console.log(`Scheduling reconnection attempt ${reconnectAttempts + 1} in ${delay}ms`);
                     
                     setTimeout(() => {
                         reconnectAttempts++;
-                        initViewer(deviceId);
+                        initViewer(remotePcId);
                     }, delay);
                 }
             },
@@ -686,7 +758,7 @@ async function initViewer(deviceId) {
         
         // Send connection request to initiate the WebRTC process
         try {
-            const response = await fetch(`/api/devices/${deviceId}/connect`, {
+            const response = await fetch(`/api/devices/${remotePcId}/connect`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${Auth.getToken()}`,
@@ -707,17 +779,19 @@ async function initViewer(deviceId) {
             }
             
             // Send request-connection via socket to initiate WebRTC connection
-            viewerSocket.emit('request-connection', {
-                deviceId: deviceId,
-                requestId: data.requestId || 'req-' + Date.now()
+            // Format matches Windows app expectation
+            viewerSocket.emit('message', {
+                type: 'connect',
+                from: clientId,
+                to: remotePcId
             });
             
             // Connect WebRTC client
-            await rtcClient.connect(deviceId);
+            await rtcClient.connect(remotePcId);
             
             // Request device status update
             viewerSocket.emit('device-status-request', {
-                deviceId: deviceId
+                remotePcId: remotePcId
             });
         } catch (apiError) {
             console.error('API connection error:', apiError);
@@ -725,21 +799,20 @@ async function initViewer(deviceId) {
             
             // For testing, we'll try to continue with WebRTC connection anyway
             try {
-                // Generate a fallback request ID
-                const fallbackRequestId = 'fallback-req-' + Date.now();
-                
                 // Send request-connection via socket to initiate WebRTC connection
-                viewerSocket.emit('request-connection', {
-                    deviceId: deviceId,
-                    requestId: fallbackRequestId
+                // Format matches Windows app expectation
+                viewerSocket.emit('message', {
+                    type: 'connect',
+                    from: clientId,
+                    to: remotePcId
                 });
                 
                 // Connect WebRTC client
-                await rtcClient.connect(deviceId);
+                await rtcClient.connect(remotePcId);
                 
                 // Request device status update
                 viewerSocket.emit('device-status-request', {
-                    deviceId: deviceId
+                    remotePcId: remotePcId
                 });
             } catch (fallbackError) {
                 console.error('Fallback connection error:', fallbackError);
@@ -760,11 +833,11 @@ async function initViewer(deviceId) {
 
 /**
  * Fetch device information from the API
- * @param {string} deviceId - Device ID
+ * @param {string} remotePcId - Device ID
  */
-async function fetchDeviceInfo(deviceId) {
+async function fetchDeviceInfo(remotePcId) {
     try {
-        const response = await fetch(`/api/devices/${deviceId}`, {
+        const response = await fetch(`/api/devices/${remotePcId}`, {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${Auth.getToken()}`,
@@ -777,7 +850,7 @@ async function fetchDeviceInfo(deviceId) {
             console.warn(`Failed to fetch device info, status: ${response.status}. Using fallback.`);
             
             // Find device in local cache
-            const device = devices.find(d => d.deviceId === deviceId);
+            const device = devices.find(d => d.remotePcId === remotePcId);
             if (device) {
                 // Update UI with cached device information
                 const deviceName = document.getElementById('device-name');
@@ -788,7 +861,7 @@ async function fetchDeviceInfo(deviceId) {
             
             // If not in cache, use hardcoded fallback
             const deviceName = document.getElementById('device-name');
-            if (deviceName) deviceName.textContent = `Device ${deviceId}`;
+            if (deviceName) deviceName.textContent = `Device ${remotePcId}`;
             updateDeviceStatus('unknown');
             return;
         }
@@ -1003,13 +1076,13 @@ function refreshConnection() {
         const retryButton = document.getElementById('retry-button');
         if (!retryButton) return;
         
-        const deviceId = retryButton.getAttribute('data-device-id');
-        if (deviceId) {
+        const remotePcId = retryButton.getAttribute('data-device-id');
+        if (remotePcId) {
             // Reset reconnection attempts
             reconnectAttempts = 0;
             
             // Reinitialize viewer
-            initViewer(deviceId);
+            initViewer(remotePcId);
         }
     } catch (error) {
         console.error('Error refreshing connection:', error);
@@ -1061,259 +1134,6 @@ function disconnectFromDevice() {
     } catch (error) {
         console.error('Error disconnecting from device:', error);
     }
-}
-
-/**
- * Get normalized coordinates relative to the screen viewport
- * @param {Event} event - Mouse or touch event
- * @returns {Object|null} - Normalized coordinates or null if not available
- */
-function getNormalizedCoordinates(event) {
-    try {
-        const screenView = document.getElementById('screen-view');
-        if (!screenView) return null;
-        
-        // Get the video element if it exists
-        const videoElement = screenView.querySelector('video');
-        if (!videoElement) return null;
-        
-        const rect = videoElement.getBoundingClientRect();
-        
-        // Get natural dimensions of the video if available, or use element dimensions
-        const videoWidth = videoElement.videoWidth || rect.width;
-        const videoHeight = videoElement.videoHeight || rect.height;
-        
-        // Scale factor between natural video dimensions and displayed size
-        const scaleX = videoWidth / rect.width;
-        const scaleY = videoHeight / rect.height;
-        
-        let x, y;
-        
-        if (event.type.startsWith('touch')) {
-            // Touch event
-            if (event.touches.length > 0) {
-                x = (event.touches[0].clientX - rect.left) * scaleX;
-                y = (event.touches[0].clientY - rect.top) * scaleY;
-            } else {
-                // No touches available
-                return null;
-            }
-        } else {
-            // Mouse event
-            x = (event.clientX - rect.left) * scaleX;
-            y = (event.clientY - rect.top) * scaleY;
-        }
-        
-        // Ensure coordinates are non-negative and within bounds
-        x = Math.max(0, Math.min(videoWidth, Math.round(x)));
-        y = Math.max(0, Math.min(videoHeight, Math.round(y)));
-        
-        return { x, y };
-    } catch (error) {
-        console.error('Error calculating normalized coordinates:', error);
-        return null;
-    }
-}
-
-/**
- * Send control command to device
- * @param {Object} command - Control command
- * @returns {Boolean} Whether the command was sent successfully
- */
-function sendControlCommand(command) {
-    try {
-        if (!rtcClient) {
-            console.warn('Cannot send control command: WebRTC client not initialized');
-            return false;
-        }
-        
-        if (!controlEnabled) {
-            console.warn('Cannot send control command: control is disabled');
-            return false;
-        }
-        
-        // Ensure command is in the format expected by Windows app InputService.cs
-        if (typeof command === 'object') {
-            // Format command object to match Windows app InputService.cs expectation:
-            // Mouse commands
-            if (command.type === 'MouseMove' || 
-                command.type === 'MouseDown' || 
-                command.type === 'MouseUp' || 
-                command.type === 'MouseClick') {
-                
-              // Ensure button field has correct capitalization for Windows app
-              if (command.button) {
-                const validButtons = ['Left', 'Right', 'Middle', 'XButton1', 'XButton2'];
-                // Try to match a valid button case-insensitively
-                const matchedButton = validButtons.find(b => 
-                  b.toLowerCase() === command.button.toLowerCase());
-                
-                if (matchedButton) {
-                  command.button = matchedButton; // Use proper capitalization
-                }
-              }
-              
-              // Ensure required fields for MouseMove
-              if (command.type === 'MouseMove' && (command.x === undefined || command.y === undefined)) {
-                console.warn('MouseMove command requires x,y coordinates');
-                return false;
-              }
-            }
-            
-            // For all command types, forward to the WebRTC client using the format
-            // that matches Windows app InputService.cs
-            return rtcClient.sendControlCommand(command);
-        } else if (typeof command === 'string') {
-            // Already a string, pass through
-            return rtcClient.sendControlCommand(command);
-        } else {
-            console.warn('Invalid control command format');
-            return false;
-        }
-    } catch (error) {
-        console.error('Error sending control command:', error);
-        return false;
-    }
-}
-
-/**
- * Handle mouse down event
- * @param {Event} event - Mouse event
- */
-function handleMouseDown(event) {
-    if (!controlEnabled || !rtcClient) return;
-    event.preventDefault();
-    
-    // Get normalized coordinates
-    const coords = getNormalizedCoordinates(event);
-    if (!coords) return;
-    
-    // Map mouse button to format expected by Windows app
-    let button;
-    switch (event.button) {
-        case 0: button = 'Left'; break;
-        case 1: button = 'Middle'; break;
-        case 2: button = 'Right'; break;
-        default: button = 'Left';
-    }
-    
-    // Send formatted command matching Windows app InputService.cs expectations
-    sendControlCommand({
-        type: "MouseDown",
-        button: button,
-        x: coords.x,
-        y: coords.y
-    });
-}
-
-/**
- * Handle mouse up event
- * @param {Event} event - Mouse event
- */
-function handleMouseUp(event) {
-    if (!controlEnabled || !rtcClient) return;
-    event.preventDefault();
-    
-    // Get normalized coordinates
-    const coords = getNormalizedCoordinates(event);
-    if (!coords) return;
-    
-    // Map mouse button to format expected by Windows app
-    let button;
-    switch (event.button) {
-        case 0: button = 'Left'; break;
-        case 1: button = 'Middle'; break;
-        case 2: button = 'Right'; break;
-        default: button = 'Left';
-    }
-    
-    // Send formatted command matching Windows app InputService.cs expectations
-    sendControlCommand({
-        type: "MouseUp",
-        button: button,
-        x: coords.x,
-        y: coords.y
-    });
-}
-
-/**
- * Handle mouse move event
- * @param {Event} event - Mouse event
- */
-function handleMouseMove(event) {
-    if (!controlEnabled || !rtcClient) return;
-    
-    // Get normalized coordinates
-    const coords = getNormalizedCoordinates(event);
-    if (!coords) return;
-    
-    // Throttle mouse move events to reduce load
-    if (!handleMouseMove.lastSent || Date.now() - handleMouseMove.lastSent > 20) {
-        // Send formatted command matching Windows app InputService.cs expectations
-        sendControlCommand({
-            type: "MouseMove",
-            x: coords.x,
-            y: coords.y,
-            isRelative: false
-        });
-        
-        handleMouseMove.lastSent = Date.now();
-    }
-}
-
-/**
- * Handle mouse wheel event
- * @param {Event} event - Wheel event
- */
-function handleMouseWheel(event) {
-    if (!controlEnabled || !rtcClient) return;
-    event.preventDefault();
-    
-    const delta = Math.sign(event.deltaY) * -1; // Invert delta for natural scrolling
-    
-    // Send formatted command matching Windows app InputService.cs expectations
-    sendControlCommand({
-        type: "MouseScroll",
-        scrollDelta: delta * 120 // Match Windows wheel delta
-    });
-}
-
-/**
- * Handle key down event
- * @param {Event} event - Keyboard event
- */
-function handleKeyDown(event) {
-    if (!controlEnabled || !rtcClient) return;
-    
-    // Focus is on the viewer element or it's within the document
-    if (!event.target.closest('#screen-view') && event.target !== document.documentElement) {
-        return;
-    }
-    
-    // Send formatted command matching Windows app InputService.cs expectations
-    sendControlCommand({
-        type: "KeyDown",
-        keyCode: event.keyCode
-    });
-}
-
-/**
- * Handle key up event
- * @param {Event} event - Keyboard event
- */
-function handleKeyUp(event) {
-    if (!controlEnabled || !rtcClient) return;
-    
-    // Focus is on the viewer element or it's within the document
-    if (!event.target.closest('#screen-view') && event.target !== document.documentElement) {
-        return;
-    }
-    
-    // Send formatted command matching Windows app InputService.cs expectations
-    sendControlCommand({
-        type: "KeyUp",
-        keyCode: event.keyCode
-    });
 }
 
 // Handle page unload

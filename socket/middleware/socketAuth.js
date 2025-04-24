@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const deviceManager = require('../../api/services/deviceManager');
 const logger = require('../../utils/logger');
 const config = require('../../config/app');
+const signalingService = require('../signalingService');
 
 /**
  * Socket authentication middleware
@@ -16,8 +17,8 @@ module.exports = async function(socket, next) {
   try {
     // Check for both query and handshake parameters to support Windows app format
     const clientType = socket.handshake.query.type || 
-                      (socket.handshake.query.hostId ? 'device' : 
-                      (socket.handshake.query.clientId ? 'dashboard' : null));
+                      (socket.handshake.query.remotePcId ? 'device' : 
+                      (socket.handshake.query.clientId && socket.handshake.query.clientId.startsWith('web-client') ? 'dashboard' : null));
     
     // Validate client type
     if (!clientType) {
@@ -66,69 +67,70 @@ async function authenticateDevice(socket, next) {
       apiKey = socket.handshake.query.apiKey;
     }
     // Check direct 'auto-register' message for compatibility with Windows app (ConnectionSettings.cs)
-    else if (socket.handshake.query.hostId) {
+    else if (socket.handshake.query.remotePcId) {
       // For the initial connection, use default API key from configuration
       // This will be validated properly during the 'auto-register' event
-      apiKey = config.deviceApiKey;
-      logger.info(`Using default API key for initial device connection: ${socket.handshake.query.hostId}`);
+      apiKey = config.remoteApiKey; // Updated from deviceApiKey to remoteApiKey
+      logger.info(`Using default API key for initial device connection: ${socket.handshake.query.remotePcId}`);
     }
     
-    // Get device ID from multiple possible sources
-    const deviceId = socket.handshake.query.clientId || 
-                     socket.handshake.query.hostId || 
-                     socket.handshake.query.deviceId;
+    // Get remotePcId from multiple possible sources - Windows app uses remotePcId
+    const remotePcId = socket.handshake.query.remotePcId;
     
     // Basic validation
     if (!apiKey) {
       // For development/testing only - auto-pass with correct device API key
-      if (process.env.NODE_ENV === 'development' && deviceId) {
-        apiKey = config.deviceApiKey;
-        logger.warn(`DEV MODE: Auto-assigning API key for device ${deviceId}`);
+      if (process.env.NODE_ENV === 'development' && remotePcId) {
+        apiKey = config.remoteApiKey; // Updated from deviceApiKey to remoteApiKey
+        logger.warn(`DEV MODE: Auto-assigning API key for device ${remotePcId}`);
       } else {
         logger.warn('Device connection attempt without API key');
         return next(new Error('API key required'));
       }
     }
     
-    if (!deviceId) {
-      logger.warn('Device connection attempt without device ID');
-      return next(new Error('Device ID required'));
+    if (!remotePcId) {
+      logger.warn('Device connection attempt without remotePcId');
+      return next(new Error('remotePcId required'));
+    }
+    
+    // Check for session reuse if sid provided - added for Windows app compatibility
+    const sid = socket.handshake.auth.sid;
+    if (sid && signalingService.isSessionValid(sid)) {
+      logger.info(`Reusing valid session for device ${remotePcId}`);
+      // Extend session
+      signalingService.extendSession(sid);
     }
     
     // Validate API key against config and handle multiple formats
     let isValidKey = false;
     
-    // Check against configured API key - handle all possible formats
-    if (apiKey === config.deviceApiKey) {
-      isValidKey = true;
-    } else if (apiKey === `ApiKey ${config.deviceApiKey}`) {
-      isValidKey = true;
-      apiKey = config.deviceApiKey; // Normalize
-    } else if (`ApiKey ${apiKey}` === config.deviceApiKey) {
-      isValidKey = true;
-    } else if (apiKey === config.deviceApiKey.replace('ApiKey ', '')) {
-      // Handle case where config has "ApiKey " prefix but incoming doesn't
-      isValidKey = true;
-      apiKey = config.deviceApiKey.replace('ApiKey ', ''); // Normalize
+    // Normalize API keys for comparison to match Windows app exactly
+    const expectedKey = config.remoteApiKey.replace('ApiKey ', '');
+    const providedKey = apiKey.replace('ApiKey ', '');
+    
+    // Direct string comparison
+    if (providedKey === expectedKey) {
+        isValidKey = true;
     } else {
-      // Fall back to database validation
-      isValidKey = await deviceManager.validateApiKey(apiKey);
+        // Fall back to database validation
+        isValidKey = await deviceManager.validateApiKey(apiKey);
     }
     
     if (!isValidKey) {
-      logger.warn(`Invalid API key used by device ${deviceId}`);
+      logger.warn(`Invalid API key used by device ${remotePcId}`);
       return next(new Error('Invalid API key'));
     }
     
     // Attach device info to socket
-    socket.deviceId = deviceId;
+    socket.remotePcId = remotePcId;
     socket.deviceAuth = {
-      apiKey: apiKey,
+      apiKey: providedKey, // Use normalized key
       authenticated: true,
       authenticatedAt: new Date()
     };
     
-    logger.info(`Device authenticated: ${deviceId}`);
+    logger.info(`Device authenticated: ${remotePcId}`);
     return next();
   } catch (error) {
     logger.error(`Device authentication error: ${error.message}`);
@@ -158,6 +160,14 @@ async function authenticateDashboard(socket, next) {
     // Check auth object next
     else if (socket.handshake.auth && socket.handshake.auth.token) {
       token = socket.handshake.auth.token;
+    }
+    
+    // Check for session reuse if sid provided
+    const sid = socket.handshake.auth.sid;
+    if (sid && signalingService.isSessionValid(sid)) {
+      logger.info(`Reusing valid session for dashboard client ${socket.id}`);
+      // Extend session
+      signalingService.extendSession(sid);
     }
     
     // Basic validation

@@ -1,6 +1,7 @@
 /**
  * Device Controller
  * Handles API endpoints for device management
+ * Updated to use remotePcId consistently with Windows app
  */
 const deviceManager = require('../services/deviceManager');
 const healthMonitor = require('../services/healthMonitor');
@@ -14,17 +15,17 @@ const { v4: uuidv4 } = require('uuid');
  */
 exports.registerDevice = async (req, res) => {
   try {
-    // Support both deviceId and hostId formats (Windows app uses hostId)
-    const deviceId = req.body.deviceId || req.body.hostId;
+    // Extract remotePcId from request - this is the only identifier used in Windows app
+    const remotePcId = req.body.remotePcId;
     const systemName = req.body.systemName;
     const apiKey = req.body.apiKey;
     const metadata = req.body.metadata || {};
     
     // Validate required fields
-    if (!deviceId || !systemName || !apiKey) {
+    if (!remotePcId || !systemName || !apiKey) {
       return res.status(400).json({
         success: false,
-        message: "Missing required fields: deviceId/hostId, systemName, apiKey"
+        message: "Missing required fields: remotePcId, systemName, apiKey"
       });
     }
     
@@ -37,9 +38,9 @@ exports.registerDevice = async (req, res) => {
       });
     }
     
-    // Register device - allow both deviceId and hostId formats
+    // Register device
     const device = await deviceManager.registerDevice({
-      deviceId,
+      remotePcId,
       systemName,
       status: 'online',
       apiKey,
@@ -50,7 +51,7 @@ exports.registerDevice = async (req, res) => {
     res.json({
       success: true,
       device: {
-        deviceId: device.deviceId,
+        remotePcId: device.remotePcId,
         systemName: device.systemName,
         status: device.status,
         firstConnection: device.firstConnection,
@@ -78,7 +79,7 @@ exports.getAllDevices = async (req, res) => {
     
     // Filter sensitive data
     const filteredDevices = devices.map(device => ({
-      deviceId: device.deviceId,
+      remotePcId: device.remotePcId,
       systemName: device.systemName,
       status: device.status || 'unknown',
       firstConnection: device.firstConnection,
@@ -112,7 +113,7 @@ exports.getOnlineDevices = async (req, res) => {
     
     // Filter sensitive data
     const filteredDevices = devices.map(device => ({
-      deviceId: device.deviceId,
+      remotePcId: device.remotePcId,
       systemName: device.systemName,
       status: device.status,
       lastConnection: device.lastConnection,
@@ -134,20 +135,20 @@ exports.getOnlineDevices = async (req, res) => {
 };
 
 /**
- * Get device by ID
+ * Get device by remotePcId
  * @param {Object} req - Express request
  * @param {Object} res - Express response
  */
 exports.getDeviceById = async (req, res) => {
   try {
-    const { deviceId } = req.params;
+    const { remotePcId } = req.params;
     
     // Get device
-    const device = await deviceManager.getDeviceById(deviceId);
+    const device = await deviceManager.getDeviceByRemotePcId(remotePcId);
     
     // Filter sensitive data
     const filteredDevice = {
-      deviceId: device.deviceId,
+      remotePcId: device.remotePcId,
       systemName: device.systemName,
       status: device.status || 'unknown',
       firstConnection: device.firstConnection,
@@ -185,7 +186,7 @@ exports.getDeviceById = async (req, res) => {
  */
 exports.updateDeviceStatus = async (req, res) => {
   try {
-    const { deviceId } = req.params;
+    const { remotePcId } = req.params;
     const { status } = req.body;
     
     // Validate status
@@ -197,13 +198,13 @@ exports.updateDeviceStatus = async (req, res) => {
     }
     
     // Update device status
-    const updatedDevice = await deviceManager.updateDeviceStatus(deviceId, status);
+    const updatedDevice = await deviceManager.updateDeviceStatus(remotePcId, status);
     
     // Return success
     res.json({
       success: true,
       device: {
-        deviceId: updatedDevice.deviceId,
+        remotePcId: updatedDevice.remotePcId,
         status: updatedDevice.status,
         lastStatusChange: updatedDevice.lastStatusChange
       }
@@ -232,21 +233,21 @@ exports.updateDeviceStatus = async (req, res) => {
  */
 exports.getDeviceHealth = async (req, res) => {
   try {
-    const { deviceId } = req.params;
+    const { remotePcId } = req.params;
     const { date, limit } = req.query;
     
     // Validate device exists
     try {
-      await deviceManager.getDeviceById(deviceId);
+      await deviceManager.getDeviceByRemotePcId(remotePcId);
     } catch (err) {
       return res.status(404).json({
         success: false,
-        message: `Device not found: ${deviceId}`
+        message: `Device not found: ${remotePcId}`
       });
     }
     
     // Get health data
-    const healthData = await healthMonitor.getDeviceHealth(deviceId, {
+    const healthData = await healthMonitor.getDeviceHealth(remotePcId, {
       date,
       limit: limit ? parseInt(limit, 10) : undefined
     });
@@ -272,21 +273,21 @@ exports.getDeviceHealth = async (req, res) => {
  */
 exports.getDeviceLogs = async (req, res) => {
   try {
-    const { deviceId } = req.params;
+    const { remotePcId } = req.params;
     const { date, limit } = req.query;
     
     // Validate device exists
     try {
-      await deviceManager.getDeviceById(deviceId);
+      await deviceManager.getDeviceByRemotePcId(remotePcId);
     } catch (err) {
       return res.status(404).json({
         success: false,
-        message: `Device not found: ${deviceId}`
+        message: `Device not found: ${remotePcId}`
       });
     }
     
     // Get logs
-    const logs = await deviceManager.getDeviceLogs(deviceId, {
+    const logs = await deviceManager.getDeviceLogs(remotePcId, {
       date,
       limit: limit ? parseInt(limit, 10) : undefined
     });
@@ -312,14 +313,14 @@ exports.getDeviceLogs = async (req, res) => {
  */
 exports.initiateConnection = async (req, res) => {
   try {
-    const { deviceId } = req.params;
+    const { remotePcId } = req.params;
     // For testing, make user ID optional
     const userId = req.user ? req.user.id : 'admin-user';
     
     // Validate device exists
     let device;
     try {
-      device = await deviceManager.getDeviceById(deviceId);
+      device = await deviceManager.getDeviceByRemotePcId(remotePcId);
       
       // For testing, force status to online
       // device.status = 'online';
@@ -334,7 +335,7 @@ exports.initiateConnection = async (req, res) => {
     } catch (err) {
       return res.status(404).json({
         success: false,
-        message: `Device not found: ${deviceId}`
+        message: `Device not found: ${remotePcId}`
       });
     }
     
@@ -343,7 +344,7 @@ exports.initiateConnection = async (req, res) => {
     
     // Log connection request
     await deviceManager.logConnectionRequest({
-      deviceId,
+      remotePcId,
       userId,
       requestId,
       timestamp: new Date()
@@ -353,7 +354,7 @@ exports.initiateConnection = async (req, res) => {
     res.json({
       success: true,
       requestId,
-      deviceId,
+      remotePcId,
       systemName: device.systemName,
       status: device.status || 'unknown',
       message: "Connection request initiated. Use WebSocket API to establish connection."

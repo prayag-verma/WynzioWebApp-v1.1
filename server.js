@@ -40,6 +40,15 @@ app.use((req, res, next) => {
   next();
 });
 
+// Extract remotePcId from URL for device-specific routes
+app.use((req, res, next) => {
+  const remotePcIdMatch = req.path.match(/\/api\/devices\/([^\/]+)/);
+  if (remotePcIdMatch && remotePcIdMatch[1]) {
+    req.remotePcId = remotePcIdMatch[1];
+  }
+  next();
+});
+
 // Add database to request object
 app.use((req, res, next) => {
   req.db = pool;
@@ -145,6 +154,8 @@ app.use((req, res) => {
 const server = http.createServer(app);
 
 // Initialize Socket.IO server with existing HTTP server
+// The signalingService should be configured to use the correct Socket.IO settings
+// that match Windows app expectations
 const io = signalingService.initialize(server);
 
 // Database initialization and server startup

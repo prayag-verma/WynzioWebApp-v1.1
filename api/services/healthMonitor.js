@@ -1,6 +1,8 @@
 /**
  * Health Monitor Service
  * Monitors device health and connectivity status
+ * Updated for file-based storage and Windows app compatibility
+ * Changed to use remotePcId consistently with Windows app
  */
 const fs = require('fs').promises;
 const path = require('path');
@@ -11,8 +13,8 @@ const deviceManager = require('./deviceManager');
 const HEALTH_DATA_DIR = path.join(__dirname, '../../data/health');
 const MONITOR_INTERVAL = 60000; // 1 minute
 const STATUS_THRESHOLDS = {
-  OFFLINE: 300000, // 5 minutes
-  IDLE: 60000      // 1 minute
+  OFFLINE: 300000, // 5 minutes - matches Windows app setting
+  IDLE: 60000      // 1 minute - matches Windows app setting
 };
 
 // Ensure health data directory exists
@@ -77,7 +79,7 @@ async function monitorAllDevices(io) {
       try {
         await checkDeviceHealth(device, io);
       } catch (err) {
-        logger.error(`Error checking device ${device.deviceId} health:`, err);
+        logger.error(`Error checking device ${device.remotePcId} health:`, err);
       }
     }
     
@@ -125,22 +127,22 @@ async function checkDeviceHealth(device, io) {
   
   // Update status if changed
   if (statusChanged) {
-    await deviceManager.updateDeviceStatus(device.deviceId, newStatus);
+    await deviceManager.updateDeviceStatus(device.remotePcId, newStatus);
     
     // Log status change
-    logger.info(`Device ${device.deviceId} status changed: ${device.status} -> ${newStatus}`);
+    logger.info(`Device ${device.remotePcId} status changed: ${device.status} -> ${newStatus}`);
     
     // Notify clients if io provided
     if (io) {
       io.emit('device-status-update', {
-        deviceId: device.deviceId,
+        remotePcId: device.remotePcId,
         status: newStatus,
         timestamp: now.toISOString()
       });
     }
     
     // Record health event
-    await recordHealthEvent(device.deviceId, {
+    await recordHealthEvent(device.remotePcId, {
       type: 'status_change',
       oldStatus: device.status,
       newStatus,
@@ -151,13 +153,13 @@ async function checkDeviceHealth(device, io) {
 
 /**
  * Record health event for a device
- * @param {String} deviceId - Device identifier
+ * @param {String} remotePcId - Device identifier
  * @param {Object} event - Event data
  */
-async function recordHealthEvent(deviceId, event) {
+async function recordHealthEvent(remotePcId, event) {
   try {
     // Create device health directory if needed
-    const deviceHealthDir = path.join(HEALTH_DATA_DIR, deviceId);
+    const deviceHealthDir = path.join(HEALTH_DATA_DIR, remotePcId);
     await fs.mkdir(deviceHealthDir, { recursive: true });
     
     // Build log file path with current date
@@ -179,7 +181,7 @@ async function recordHealthEvent(deviceId, event) {
     // Save updated events
     await fs.writeFile(logFilePath, JSON.stringify(events, null, 2));
   } catch (error) {
-    logger.error(`Error recording health event for ${deviceId}:`, error);
+    logger.error(`Error recording health event for ${remotePcId}:`, error);
   }
 }
 
@@ -227,14 +229,14 @@ async function saveMonitoringSummary(devices) {
 
 /**
  * Get device health data
- * @param {String} deviceId - Device identifier
+ * @param {String} remotePcId - Device identifier
  * @param {Object} options - Query options
  * @returns {Promise<Object>} Health data
  */
-async function getDeviceHealth(deviceId, options = {}) {
+async function getDeviceHealth(remotePcId, options = {}) {
   try {
     const { date, limit } = options;
-    const deviceHealthDir = path.join(HEALTH_DATA_DIR, deviceId);
+    const deviceHealthDir = path.join(HEALTH_DATA_DIR, remotePcId);
     
     // Check if health data directory exists
     try {
@@ -271,7 +273,7 @@ async function getDeviceHealth(deviceId, options = {}) {
     // Get current device data
     let device;
     try {
-      device = await deviceManager.getDeviceById(deviceId);
+      device = await deviceManager.getDeviceByRemotePcId(remotePcId);
     } catch (err) {
       device = null;
     }
@@ -315,7 +317,7 @@ async function getSystemHealth(options = {}) {
         summary: latestSummary,
         history: summaries,
         devices: devices.map(d => ({
-          deviceId: d.deviceId,
+          remotePcId: d.remotePcId,
           systemName: d.systemName,
           status: d.status,
           lastSeen: d.lastSeen

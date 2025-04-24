@@ -1,6 +1,7 @@
 /**
  * WebSocket Signaling Service for Wynzio
  * Handles real-time communication between Windows clients and web dashboard
+ * Updated to match Windows app's SignalingService.cs format exactly
  */
 const socketIo = require('socket.io');
 const deviceManager = require('../api/services/deviceManager');
@@ -15,8 +16,9 @@ const CLIENT_TIMEOUT = 30000; // 30 seconds
 const HEARTBEAT_INTERVAL = 25000; // 25 seconds - matching Windows app default
 const RECONNECT_BASE_DELAY = 2000; // Base delay for exponential backoff (ms)
 const MAX_RECONNECT_ATTEMPTS = 5; // Match Windows app setting
+const SESSION_TIMEOUT = 24 * 60 * 60 * 1000; // 24 hours to match Windows app SessionManager.cs exactly
 
-// Create data directory if it doesn't exist
+// Ensure data directory exists
 if (!fs.existsSync(DEVICE_DATA_DIR)) {
   fs.mkdirSync(DEVICE_DATA_DIR, { recursive: true });
 }
@@ -38,6 +40,8 @@ class SignalingService {
     this.monitorIntervalId = null;
     // Store pending reconnection timers
     this.reconnectTimers = new Map();
+    // Store session expirations (SID validity) - Added for Windows app compatibility
+    this.sessionExpirations = new Map();
   }
 
   /**
@@ -51,14 +55,14 @@ class SignalingService {
         origin: "*",
         methods: ["GET", "POST"]
       },
-      pingTimeout: 10000,
-      pingInterval: 5000,
+      pingTimeout: 20000, // Match Windows app settings
+      pingInterval: HEARTBEAT_INTERVAL, // Match Windows app settings
       // Allow transport polling and websocket to match Windows app
       transports: ['polling', 'websocket'],
       // Make Socket.IO format compatible with Windows app
       allowEIO3: true,
-      // Path must match Windows app
-      path: '/socket.io'
+      // Path must match Windows app SignalingService.cs -> '/signal'
+      path: '/signal'
     });
 
     // Authentication middleware
@@ -72,7 +76,7 @@ class SignalingService {
     // Start health monitoring
     this.startMonitoring();
 
-    logger.info('WebSocket signaling service initialized');
+    logger.info('WebSocket signaling service initialized with /signal path');
     return this.io;
   }
 
@@ -106,27 +110,39 @@ class SignalingService {
    * @param {Object} socket - Socket instance
    */
   handleConnection(socket) {
-    // Check for both clientId and hostId to support Windows app format
-    const clientId = socket.handshake.query.clientId || socket.handshake.query.hostId || socket.id;
+    // Check for both clientId and remotePcId to support Windows app format
+    const clientId = socket.handshake.query.clientId || socket.id;
+    const remotePcId = socket.handshake.query.remotePcId;
+    
     // Check for client type - Windows app may not send this explicitly
     const clientType = socket.handshake.query.type || 
-                      (socket.handshake.query.hostId ? 'device' : 
-                      (socket.handshake.query.clientId ? 'dashboard' : 'unknown'));
+                      (remotePcId ? 'device' : 
+                      (clientId && clientId.startsWith('web-client') ? 'dashboard' : 'unknown'));
 
-    logger.info(`New ${clientType} connection: ${clientId}`);
+    logger.info(`New ${clientType} connection: ${remotePcId || clientId}`);
     
     // Reset reconnection attempts on successful connection
-    this.reconnectAttempts.set(clientId, 0);
+    if (remotePcId) {
+      this.reconnectAttempts.set(remotePcId, 0);
+    } else {
+      this.reconnectAttempts.set(clientId, 0);
+    }
     
     // Clear any pending reconnect timer
-    if (this.reconnectTimers.has(clientId)) {
+    if (remotePcId && this.reconnectTimers.has(remotePcId)) {
+      clearTimeout(this.reconnectTimers.get(remotePcId));
+      this.reconnectTimers.delete(remotePcId);
+    } else if (this.reconnectTimers.has(clientId)) {
       clearTimeout(this.reconnectTimers.get(clientId));
       this.reconnectTimers.delete(clientId);
     }
     
+    // Set session expiration (24 hours from now) - added for Windows app compatibility
+    this.sessionExpirations.set(socket.id, Date.now() + SESSION_TIMEOUT);
+    
     // Handle device client (Windows app)
     if (clientType === 'device') {
-      this.handleDeviceConnection(socket, clientId);
+      this.handleDeviceConnection(socket, remotePcId);
     } 
     // Handle web dashboard client
     else if (clientType === 'dashboard') {
@@ -135,15 +151,15 @@ class SignalingService {
 
     // Generic disconnect handler
     socket.on('disconnect', (reason) => {
-      logger.info(`Client disconnected: ${clientId}, reason: ${reason}`);
-      this.activeConnections.delete(clientId);
-      
-      // Update status for devices
-      if (clientType === 'device') {
-        deviceManager.updateDeviceStatus(clientId, 'offline')
+      if (remotePcId) {
+        logger.info(`Device disconnected: ${remotePcId}, reason: ${reason}`);
+        this.activeConnections.delete(remotePcId);
+        
+        // Update status for devices
+        deviceManager.updateDeviceStatus(remotePcId, 'offline')
           .then(() => {
             this.io.emit('device-status-update', {
-              deviceId: clientId,
+              remotePcId: remotePcId,
               status: 'offline',
               timestamp: new Date().toISOString(),
               reason: reason
@@ -153,103 +169,115 @@ class SignalingService {
           
         // Schedule reconnection attempt if not an intentional disconnect
         if (reason !== 'client namespace disconnect' && reason !== 'io server disconnect') {
-          this.scheduleReconnection(clientId, clientType);
+          this.scheduleReconnection(remotePcId, clientType);
         }
+      } else {
+        logger.info(`Client disconnected: ${clientId}, reason: ${reason}`);
+        this.activeConnections.delete(clientId);
       }
     });
 
     // Error handler
     socket.on('error', (error) => {
-      logger.error(`Socket error for ${clientId}:`, error);
+      if (remotePcId) {
+        logger.error(`Socket error for device ${remotePcId}:`, error);
+      } else {
+        logger.error(`Socket error for client ${clientId}:`, error);
+      }
     });
     
     // Handle reconnect events
     socket.on('reconnect', (attemptNumber) => {
-      logger.info(`Client ${clientId} reconnected after ${attemptNumber} attempts`);
-      
-      // Reset reconnection attempts
-      this.reconnectAttempts.set(clientId, 0);
-      
-      // Update device status if reconnected
-      if (clientType === 'device') {
-        deviceManager.updateDeviceStatus(clientId, 'online')
+      if (remotePcId) {
+        logger.info(`Device ${remotePcId} reconnected after ${attemptNumber} attempts`);
+        
+        // Reset reconnection attempts
+        this.reconnectAttempts.set(remotePcId, 0);
+        
+        // Update device status if reconnected
+        deviceManager.updateDeviceStatus(remotePcId, 'online')
           .then(() => {
             this.io.emit('device-status-update', {
-              deviceId: clientId,
+              remotePcId: remotePcId,
               status: 'online',
               timestamp: new Date().toISOString()
             });
           })
           .catch(err => logger.error(`Error updating device status: ${err.message}`));
+      } else {
+        logger.info(`Client ${clientId} reconnected after ${attemptNumber} attempts`);
+        this.reconnectAttempts.set(clientId, 0);
       }
     });
     
     // Handle explicit reconnection failure
     socket.on('reconnect_failed', () => {
-      logger.warn(`Client ${clientId} failed to reconnect after max attempts`);
-      
-      // Mark device as offline if it's a device
-      if (clientType === 'device') {
-        deviceManager.updateDeviceStatus(clientId, 'offline')
+      if (remotePcId) {
+        logger.warn(`Device ${remotePcId} failed to reconnect after max attempts`);
+        
+        // Mark device as offline if it's a device
+        deviceManager.updateDeviceStatus(remotePcId, 'offline')
           .catch(err => logger.error(`Error updating device status: ${err.message}`));
+      } else {
+        logger.warn(`Client ${clientId} failed to reconnect after max attempts`);
       }
     });
   }
 
   /**
    * Schedule a reconnection attempt with exponential backoff
-   * @param {String} clientId - Client identifier
+   * @param {String} remotePcId - Remote PC identifier
    * @param {String} clientType - Client type ('device' or 'dashboard')
    */
-  scheduleReconnection(clientId, clientType) {
+  scheduleReconnection(remotePcId, clientType) {
     // Only schedule reconnection for devices
     if (clientType !== 'device') return;
     
     // Get current attempt count
-    let attempts = this.reconnectAttempts.get(clientId) || 0;
+    let attempts = this.reconnectAttempts.get(remotePcId) || 0;
     
-    // Stop after max attempts
+    // Stop after max attempts - match Windows app exactly
     if (attempts >= MAX_RECONNECT_ATTEMPTS) {
-      logger.warn(`Maximum reconnection attempts reached for ${clientId}`);
+      logger.warn(`Maximum reconnection attempts reached for ${remotePcId}`);
       return;
     }
     
     // Calculate delay with exponential backoff (2^attempt seconds)
     const delay = RECONNECT_BASE_DELAY * Math.pow(2, attempts);
-    logger.info(`Scheduling reconnection for ${clientId} in ${delay}ms (attempt ${attempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+    logger.info(`Scheduling reconnection for ${remotePcId} in ${delay}ms (attempt ${attempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
     
     // Schedule reconnection
     const timer = setTimeout(() => {
       // Increment attempt counter
-      this.reconnectAttempts.set(clientId, attempts + 1);
+      this.reconnectAttempts.set(remotePcId, attempts + 1);
       
       // Try to reconnect by notifying all clients about an offline device
       // that might be trying to reconnect
       this.io.emit('reconnect-attempt', {
-        deviceId: clientId,
+        remotePcId: remotePcId,
         attempt: attempts + 1,
         timestamp: new Date().toISOString()
       });
       
       // Schedule next attempt if not max attempts
       if (attempts + 1 < MAX_RECONNECT_ATTEMPTS) {
-        this.scheduleReconnection(clientId, clientType);
+        this.scheduleReconnection(remotePcId, clientType);
       }
     }, delay);
     
     // Store the timer
-    this.reconnectTimers.set(clientId, timer);
+    this.reconnectTimers.set(remotePcId, timer);
   }
 
   /**
    * Handle device client connection (Windows app)
    * @param {Object} socket - Socket instance
-   * @param {String} deviceId - Device identifier
+   * @param {String} remotePcId - Remote PC identifier
    */
-  handleDeviceConnection(socket, deviceId) {
+  handleDeviceConnection(socket, remotePcId) {
     // Store connection
-    this.activeConnections.set(deviceId, socket);
-    this.connectionTimestamps.set(deviceId, Date.now());
+    this.activeConnections.set(remotePcId, socket);
+    this.connectionTimestamps.set(remotePcId, Date.now());
 
     // Auto-register handler - matches Windows app SignalingService.cs format exactly
     socket.on('auto-register', async (deviceInfo) => {
@@ -268,23 +296,26 @@ class SignalingService {
           data = deviceInfo; // Use directly as data
         }
         
-        logger.debug(`Auto-register request from ${deviceId}:`, data);
+        logger.debug(`Auto-register request from ${remotePcId}:`, data);
         
         // Extract fields using Windows app format names
-        const hostId = data.hostId || data.deviceId || deviceId;
+        const receivedRemotePcId = data.remotePcId || remotePcId;
         const systemName = data.systemName || 'Unknown Device';
         const apiKey = data.apiKey;
-        const metadata = data.metadata || {};
+        const metadata = {
+          OSName: data.OSName,
+          OSversion: data.OSversion
+        };
         
         // Validate required fields
-        if (!hostId || !apiKey) {
+        if (!receivedRemotePcId || !apiKey) {
           socket.emit('error', { 
             error: 'Missing required fields' 
           });
           return;
         }
 
-        // Validate API key
+        // Validate API key - exact match with the key from Windows app
         const isValidKey = await deviceManager.validateApiKey(apiKey);
         if (!isValidKey) {
           socket.emit('error', { 
@@ -295,7 +326,7 @@ class SignalingService {
 
         // Register device in database
         const device = await deviceManager.registerDevice({
-          deviceId: hostId,
+          remotePcId: receivedRemotePcId,
           systemName,
           status: 'online',
           lastConnection: new Date(),
@@ -305,20 +336,18 @@ class SignalingService {
 
         // Send confirmation exactly as Windows app expects
         socket.emit('registration-success', { 
-          deviceId: hostId,
-          status: "registered",
-          timestamp: new Date().toISOString()
+          status: "success"
         });
 
         // Update all dashboard clients
         this.io.emit('device-status-update', {
-          deviceId: hostId,
+          remotePcId: receivedRemotePcId,
           systemName,
           status: 'online',
           timestamp: new Date().toISOString()
         });
 
-        logger.info(`Device registered: ${hostId} (${systemName})`);
+        logger.info(`Device registered: ${receivedRemotePcId} (${systemName})`);
       } catch (error) {
         logger.error(`Device registration error:`, error);
         socket.emit('error', { 
@@ -332,9 +361,9 @@ class SignalingService {
     socket.conn.on('packet', (packet) => {
       if (packet.type === 2) { // Engine.IO ping packet
         // Update timestamp
-        this.connectionTimestamps.set(deviceId, Date.now());
+        this.connectionTimestamps.set(remotePcId, Date.now());
         // Update device last seen
-        deviceManager.updateDeviceLastSeen(deviceId)
+        deviceManager.updateDeviceLastSeen(remotePcId)
           .catch(err => logger.error(`Error updating device last seen: ${err.message}`));
           
         // Send pong (type 3) if needed - Engine.IO should do this automatically
@@ -349,15 +378,15 @@ class SignalingService {
     
     // Handle explicit heartbeat event
     socket.on('heartbeat', (data) => {
-      this.connectionTimestamps.set(deviceId, Date.now());
-      deviceManager.updateDeviceLastSeen(deviceId)
+      this.connectionTimestamps.set(remotePcId, Date.now());
+      deviceManager.updateDeviceLastSeen(remotePcId)
         .catch(err => logger.error(`Error updating device last seen: ${err.message}`));
     });
 
     // Socket.IO ping is handled internally, but we can log it
     socket.on('ping', () => {
-      this.connectionTimestamps.set(deviceId, Date.now());
-      deviceManager.updateDeviceLastSeen(deviceId)
+      this.connectionTimestamps.set(remotePcId, Date.now());
+      deviceManager.updateDeviceLastSeen(remotePcId)
         .catch(err => logger.error(`Error updating device last seen: ${err.message}`));
     });
 
@@ -367,7 +396,7 @@ class SignalingService {
         // Extract message type and routing information
         const messageType = data.type?.toLowerCase();
         const targetId = data.to;
-        const senderId = data.from || deviceId;
+        const senderId = data.from || remotePcId;
         
         // Skip processing if no target
         if (!targetId || !messageType) {
@@ -398,10 +427,10 @@ class SignalingService {
         // For offers, update connection status
         if (messageType === 'offer' && data.payload) {
           // Update device last seen
-          await deviceManager.updateDeviceLastSeen(deviceId);
+          await deviceManager.updateDeviceLastSeen(remotePcId);
         }
       } catch (error) {
-        logger.error(`Error processing message from ${deviceId}:`, error);
+        logger.error(`Error processing message from ${remotePcId}:`, error);
       }
     });
     
@@ -425,7 +454,7 @@ class SignalingService {
             type: data.payload.type
           };
         } else {
-          logger.warn(`Invalid offer format from ${deviceId}`);
+          logger.warn(`Invalid offer format from ${remotePcId}`);
           return;
         }
         
@@ -435,7 +464,7 @@ class SignalingService {
           // Format to match what Windows app expects in SignalingService.cs
           targetSocket.emit('message', {
             type: 'offer',
-            from: deviceId,
+            from: remotePcId,
             to: targetId,
             payload: {
               sdp: offer.sdp,
@@ -444,7 +473,7 @@ class SignalingService {
           });
         }
       } catch (error) {
-        logger.error(`Error processing offer from ${deviceId}:`, error);
+        logger.error(`Error processing offer from ${remotePcId}:`, error);
       }
     });
 
@@ -466,7 +495,7 @@ class SignalingService {
             type: data.payload.type
           };
         } else {
-          logger.warn(`Invalid answer format from ${deviceId}`);
+          logger.warn(`Invalid answer format from ${remotePcId}`);
           return;
         }
         
@@ -476,19 +505,16 @@ class SignalingService {
           // Format to match what Windows app expects in SignalingService.cs
           targetSocket.emit('message', {
             type: 'answer',
-            from: deviceId,
+            from: remotePcId,
             to: targetId,
             payload: {
               sdp: answer.sdp,
-              type: answer.type,
-              hostId: deviceId,
-              accepted: true,
-              timestamp: Date.now()
+              type: answer.type
             }
           });
         }
       } catch (error) {
-        logger.error(`Error processing answer from ${deviceId}:`, error);
+        logger.error(`Error processing answer from ${remotePcId}:`, error);
       }
     });
 
@@ -511,7 +537,7 @@ class SignalingService {
             sdpMid: data.payload.sdpMid
           };
         } else {
-          logger.warn(`Invalid ICE candidate format from ${deviceId}`);
+          logger.warn(`Invalid ICE candidate format from ${remotePcId}`);
           return;
         }
         
@@ -521,7 +547,7 @@ class SignalingService {
           // Format to match what Windows app expects in SignalingService.cs
           targetSocket.emit('message', {
             type: 'ice-candidate',
-            from: deviceId,
+            from: remotePcId,
             to: targetId,
             payload: {
               candidate: candidate.candidate,
@@ -531,7 +557,7 @@ class SignalingService {
           });
         }
       } catch (error) {
-        logger.error(`Error processing ICE candidate from ${deviceId}:`, error);
+        logger.error(`Error processing ICE candidate from ${remotePcId}:`, error);
       }
     });
 
@@ -545,12 +571,12 @@ class SignalingService {
           // Format matches Windows app expectation
           targetSocket.emit('control-response', {
             requestId,
-            deviceId,
+            remotePcId,
             accepted
           });
         }
       } catch (error) {
-        logger.error(`Error processing control response from ${deviceId}:`, error);
+        logger.error(`Error processing control response from ${remotePcId}:`, error);
       }
     });
     
@@ -562,12 +588,12 @@ class SignalingService {
           // Pass along as is - Windows app format
           targetSocket.emit('control-command', {
             type: 'control-command',
-            peerId: deviceId,
+            peerId: remotePcId,
             command: typeof data.command === 'string' ? data.command : JSON.stringify(data.command)
           });
         }
       } catch (error) {
-        logger.error(`Error processing control command from ${deviceId}:`, error);
+        logger.error(`Error processing control command from ${remotePcId}:`, error);
       }
     });
   }
@@ -581,6 +607,24 @@ class SignalingService {
     // Store connection
     this.activeConnections.set(userId, socket);
     
+    // Handle session reuse - for WebSocket connections from Windows app
+    const sid = socket.handshake.auth.sid;
+    if (sid) {
+      const sessionExpiration = this.sessionExpirations.get(sid);
+      if (sessionExpiration && Date.now() < sessionExpiration) {
+        logger.info(`Reusing valid session: ${sid} for client ${userId}`);
+        // Extend session expiration
+        this.sessionExpirations.set(socket.id, Date.now() + SESSION_TIMEOUT);
+      } else {
+        logger.info(`Session expired or invalid: ${sid} for client ${userId}`);
+        // Set new session expiration
+        this.sessionExpirations.set(socket.id, Date.now() + SESSION_TIMEOUT);
+      }
+    } else {
+      // New session
+      this.sessionExpirations.set(socket.id, Date.now() + SESSION_TIMEOUT);
+    }
+    
     // Send initial device list
     deviceManager.getOnlineDevices()
       .then(devices => {
@@ -593,8 +637,17 @@ class SignalingService {
     // Handle connection request
     socket.on('request-connection', async (data) => {
       try {
-        const { deviceId, requestId } = data;
-        const deviceSocket = this.activeConnections.get(deviceId);
+        const { remotePcId, requestId } = data;
+        
+        if (!remotePcId) {
+          socket.emit('connection-error', {
+            requestId,
+            error: 'Missing remotePcId'
+          });
+          return;
+        }
+        
+        const deviceSocket = this.activeConnections.get(remotePcId);
         
         if (!deviceSocket) {
           socket.emit('connection-error', {
@@ -606,7 +659,7 @@ class SignalingService {
 
         // Log connection request
         await deviceManager.logConnectionRequest({
-          deviceId,
+          remotePcId,
           userId,
           requestId,
           timestamp: new Date()
@@ -617,7 +670,7 @@ class SignalingService {
         deviceSocket.emit('message', {
           type: 'remote-control-request',
           from: userId,
-          to: deviceId,
+          to: remotePcId,
           payload: {
             requestId,
             peerId: userId
@@ -768,8 +821,8 @@ class SignalingService {
     // Handle remote control commands - format to match InputService.cs expectations
     socket.on('control-command', (data) => {
       try {
-        const { deviceId, command } = data;
-        const deviceSocket = this.activeConnections.get(deviceId);
+        const { remotePcId, command } = data;
+        const deviceSocket = this.activeConnections.get(remotePcId);
         
         if (deviceSocket) {
           // Format to match what Windows app expects in InputService.cs
@@ -780,7 +833,7 @@ class SignalingService {
           });
         } else {
           socket.emit('connection-error', {
-            error: `Target device ${deviceId} not connected`
+            error: `Target device ${remotePcId} not connected`
           });
         }
       } catch (error) {
@@ -794,18 +847,18 @@ class SignalingService {
     // Handle device status requests
     socket.on('device-status-request', async (data) => {
       try {
-        const { deviceId } = data;
+        const { remotePcId } = data;
         
-        if (!deviceId) {
+        if (!remotePcId) {
           return;
         }
         
         // Get current device status
-        const device = await deviceManager.getDeviceById(deviceId);
+        const device = await deviceManager.getDeviceByRemotePcId(remotePcId);
         
         // Return the status
         socket.emit('device-status-update', {
-          deviceId: device.deviceId,
+          remotePcId: device.remotePcId,
           status: device.status,
           lastSeen: device.lastSeen,
           timestamp: new Date().toISOString()
@@ -823,32 +876,40 @@ class SignalingService {
     const now = Date.now();
     
     // Check all devices with timestamps
-    this.connectionTimestamps.forEach(async (timestamp, deviceId) => {
+    this.connectionTimestamps.forEach(async (timestamp, remotePcId) => {
       try {
         // Auto-detect device status based on last seen time
-        await deviceManager.detectDeviceStatus(deviceId);
+        await deviceManager.detectDeviceStatus(remotePcId);
         
         // Get current device status
-        const device = await deviceManager.getDeviceById(deviceId);
+        const device = await deviceManager.getDeviceByRemotePcId(remotePcId);
         
         // If device was online but is now idle/offline, notify clients
-        if (device.status !== 'online' && this.activeConnections.has(deviceId)) {
+        if (device.status !== 'online' && this.activeConnections.has(remotePcId)) {
           this.io.emit('device-status-update', {
-            deviceId,
+            remotePcId,
             status: device.status,
             timestamp: new Date().toISOString()
           });
         }
       } catch (error) {
         // Handle error silently - device might have been deleted
-        logger.debug(`Error monitoring device ${deviceId}: ${error.message}`);
+        logger.debug(`Error monitoring device ${remotePcId}: ${error.message}`);
       }
     });
     
     // Clean up old timestamps for devices that are no longer connected
-    this.connectionTimestamps.forEach((timestamp, deviceId) => {
-      if (!this.activeConnections.has(deviceId)) {
-        this.connectionTimestamps.delete(deviceId);
+    this.connectionTimestamps.forEach((timestamp, remotePcId) => {
+      if (!this.activeConnections.has(remotePcId)) {
+        this.connectionTimestamps.delete(remotePcId);
+      }
+    });
+    
+    // Clean up expired sessions
+    this.sessionExpirations.forEach((expiration, sid) => {
+      if (now > expiration) {
+        this.sessionExpirations.delete(sid);
+        logger.debug(`Session expired: ${sid}`);
       }
     });
   }
@@ -872,7 +933,7 @@ class SignalingService {
     this.activeConnections.forEach((socket, id) => {
       // Check both query and socket property since Windows app might store it differently
       const socketType = socket.handshake.query.type || 
-                        (socket.handshake.query.hostId ? 'device' : 
+                        (socket.handshake.query.remotePcId ? 'device' : 
                         (socket.handshake.query.clientId ? 'dashboard' : 'unknown'));
       
       if (socketType === type) {
@@ -881,6 +942,27 @@ class SignalingService {
     });
     
     return connections;
+  }
+  
+  /**
+   * Check if a session ID is valid and not expired
+   * @param {string} sid - Session ID to check
+   * @returns {boolean} Whether the session is valid
+   */
+  isSessionValid(sid) {
+    const expiration = this.sessionExpirations.get(sid);
+    return expiration !== undefined && Date.now() < expiration;
+  }
+  
+  /**
+   * Extend session expiration
+   * @param {string} sid - Session ID to extend
+   */
+  extendSession(sid) {
+    if (this.sessionExpirations.has(sid)) {
+      this.sessionExpirations.set(sid, Date.now() + SESSION_TIMEOUT);
+      logger.debug(`Session extended: ${sid}`);
+    }
   }
 }
 

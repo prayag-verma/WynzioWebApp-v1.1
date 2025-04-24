@@ -1,13 +1,13 @@
 /**
  * WebRTC Viewer for Wynzio
  * Handles screen viewing and remote control functionality
- * Modified to match Windows app WebRTCService.cs expectations
+ * Updated to exactly match Windows app WebRTCService.cs expectations
  */
 const WynzioWebRTC = (function() {
   // Private variables
   let socket = null;
   let peerConnection = null;
-  let deviceId = null;
+  let remotePcId = null;
   let clientId = null;
   let isConnected = false;
   let isConnecting = false;
@@ -20,9 +20,9 @@ const WynzioWebRTC = (function() {
   let reconnectTimeout = null;
   let connectionMonitorInterval = null;
   
-  // Reconnection configuration
-  const MAX_RECONNECT_ATTEMPTS = 5;  // Match Windows app
-  const RECONNECT_BASE_DELAY = 2000; // 2 seconds base delay
+  // Reconnection configuration - matches Windows app settings
+  const MAX_RECONNECT_ATTEMPTS = 5;  // Match Windows app MaxReconnectAttempts
+  const RECONNECT_BASE_DELAY = 2000; // 2 seconds base delay (matches Windows app)
   
   // Configuration - matches Windows app settings in ConnectionSettings.cs
   const config = {
@@ -38,25 +38,66 @@ const WynzioWebRTC = (function() {
   
   /**
    * Get stored client ID from localStorage or generate a new one
+   * Renamed to match Windows app convention
    * @returns {string} Client ID
    */
   function getStoredClientId() {
-    // Use consistent key name across all files
-    const storedClientId = localStorage.getItem('wynzio_client_id');
+    // First try with new name format
+    let storedClientId = localStorage.getItem('webClientId');
     
-    if (storedClientId) {
-      console.log('Using stored client ID:', storedClientId);
-      return storedClientId;
+    // If not found, try legacy format for backward compatibility
+    if (!storedClientId) {
+      storedClientId = localStorage.getItem('wynzio_client_id');
+      // If found in old format, migrate to new format
+      if (storedClientId) {
+        localStorage.setItem('webClientId', storedClientId);
+        // Keep old key for backward compatibility but future updates will use new key
+      }
     }
     
-    // Generate a new client ID if none exists
-    const newClientId = 'web-client-' + Date.now();
+    // If still not found, generate new ID
+    if (!storedClientId) {
+      storedClientId = 'web-client-' + Date.now();
+      localStorage.setItem('webClientId', storedClientId);
+      console.log('Created new client ID:', storedClientId);
+    } else {
+      console.log('Using stored client ID:', storedClientId);
+    }
     
-    // Store in localStorage for persistence
-    localStorage.setItem('wynzio_client_id', newClientId);
-    console.log('Created new client ID:', newClientId);
+    return storedClientId;
+  }
+  
+  /**
+   * Store and retrieve session data for reuse
+   * Added to match Windows app SessionManager.cs
+   */
+  function storeSessionId(sid, timestamp = Date.now()) {
+    localStorage.setItem('wynzio_session_id', sid);
+    localStorage.setItem('wynzio_session_timestamp', timestamp.toString());
+    console.log('Stored session ID:', sid);
+  }
+  
+  function getStoredSessionId() {
+    const sid = localStorage.getItem('wynzio_session_id');
+    const timestamp = parseInt(localStorage.getItem('wynzio_session_timestamp') || '0');
     
-    return newClientId;
+    // Check if session is still valid (less than 24 hours old) - matching Windows app
+    if (sid && (Date.now() - timestamp < 24 * 60 * 60 * 1000)) {
+      console.log('Using stored session ID:', sid);
+      return sid;
+    }
+    
+    console.log('No valid session ID found');
+    return null;
+  }
+  
+  /**
+   * Clear session data
+   */
+  function clearSessionData() {
+    localStorage.removeItem('wynzio_session_id');
+    localStorage.removeItem('wynzio_session_timestamp');
+    console.log('Cleared session data');
   }
   
   /**
@@ -85,8 +126,8 @@ const WynzioWebRTC = (function() {
       }
       
       // Set device ID and generate client ID
-      if (options.deviceId) {
-        deviceId = options.deviceId;
+      if (options.remotePcId) {
+        remotePcId = options.remotePcId;
       }
       
       // Use the clientId from options if provided, or get from storage
@@ -141,7 +182,7 @@ const WynzioWebRTC = (function() {
             if (peerConnection && peerConnection.connectionState === 'connected') {
               dataChannel = peerConnection.createDataChannel('control', {
                 ordered: true,
-                negotiated: false
+                negotiated: false // Let the connection handle negotiation
               });
               this.setupDataChannel(dataChannel);
             } else {
@@ -234,35 +275,33 @@ const WynzioWebRTC = (function() {
       socket.on('answer', this.handleAnswer.bind(this));
       socket.on('ice-candidate', this.handleIceCandidate.bind(this));
       
-      // Handle control response - always assume granted
+      // Handle control response - always assume granted to match Windows app auto-accept
       socket.on('control-response', (data) => {
         console.log('Control access response:', data);
         
-        // Enable controls if response indicates accepted
-        if (data.accepted) {
-          if (!controlsEnabled) {
-            this.enableControls();
-          }
+        // Enable controls regardless of response since Windows app auto-accepts
+        if (!controlsEnabled) {
+          this.enableControls();
         }
       });
       
       // Handle connection status updates
       socket.on('device-status-update', (data) => {
-        if (data.deviceId === deviceId && data.status !== 'online' && isConnected) {
+        if (data.remotePcId === remotePcId && data.status !== 'online' && isConnected) {
           // Device went offline or idle while connected
           this.disconnect();
           connectionCallbacks.onDisconnected('Device went offline');
         }
       });
       
-      // Handle reconnection events
+      // Handle reconnect events
       socket.on('reconnect-attempt', (data) => {
-        if (data.deviceId === deviceId && !isConnected && !isConnecting) {
-          console.log(`Reconnection attempt ${data.attempt} for device ${deviceId}`);
+        if (data.remotePcId === remotePcId && !isConnected && !isConnecting) {
+          console.log(`Reconnection attempt ${data.attempt} for device ${remotePcId}`);
           
           // Try to reconnect if not already connecting
           if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-            this.connect(deviceId);
+            this.connect(remotePcId);
           }
         }
       });
@@ -279,10 +318,10 @@ const WynzioWebRTC = (function() {
     
     /**
      * Connect to a device
-     * @param {String} targetDeviceId - Device ID to connect to
+     * @param {String} targetRemotePcId - Device ID to connect to
      * @returns {Promise} Connection result
      */
-    async connect(targetDeviceId) {
+    async connect(targetRemotePcId) {
       return new Promise(async (resolve, reject) => {
         try {
           // Validate requirements
@@ -295,11 +334,11 @@ const WynzioWebRTC = (function() {
           }
           
           // Update device ID if provided
-          if (targetDeviceId) {
-            deviceId = targetDeviceId;
+          if (targetRemotePcId) {
+            remotePcId = targetRemotePcId;
           }
           
-          if (!deviceId) {
+          if (!remotePcId) {
             throw new Error('No device ID specified');
           }
           
@@ -347,7 +386,7 @@ const WynzioWebRTC = (function() {
           socket.emit('message', {
             type: 'offer',
             from: clientId,
-            to: deviceId,
+            to: remotePcId,
             payload: {
               sdp: peerConnection.localDescription.sdp,
               type: peerConnection.localDescription.type
@@ -396,7 +435,7 @@ const WynzioWebRTC = (function() {
       // Notify disconnection
       connectionCallbacks.onDisconnected(reason);
       
-      // Attempt reconnection with exponential backoff
+      // Attempt reconnection with exponential backoff - match Windows app exactly
       if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         const delay = RECONNECT_BASE_DELAY * Math.pow(2, reconnectAttempts);
         console.log(`Scheduling reconnection attempt ${reconnectAttempts + 1} in ${delay}ms`);
@@ -409,7 +448,7 @@ const WynzioWebRTC = (function() {
         // Schedule reconnection
         reconnectTimeout = setTimeout(() => {
           reconnectAttempts++;
-          this.connect(deviceId).catch(err => {
+          this.connect(remotePcId).catch(err => {
             console.error('Reconnection attempt failed:', err);
           });
         }, delay);
@@ -466,11 +505,11 @@ const WynzioWebRTC = (function() {
         }
         
         // Send disconnect message to server for the device
-        if (socket && deviceId) {
+        if (socket && remotePcId) {
           socket.emit('message', {
             type: 'disconnect',
             from: clientId,
-            to: deviceId
+            to: remotePcId
           });
         }
         
@@ -538,11 +577,11 @@ const WynzioWebRTC = (function() {
         // Extract offer details - support multiple formats
         let offerSdp, offerType, fromId;
         
-        // Format 1: { deviceId, offer: { sdp, type } }
-        if (data.deviceId && data.offer) {
+        // Format 1: { remotePcId, offer: { sdp, type } }
+        if (data.remotePcId && data.offer) {
           offerSdp = data.offer.sdp;
           offerType = data.offer.type;
-          fromId = data.deviceId;
+          fromId = data.remotePcId;
         }
         // Format 2: { from, to, payload: { sdp, type } }
         else if (data.from && data.to && data.payload) {
@@ -556,7 +595,7 @@ const WynzioWebRTC = (function() {
         }
         
         // Skip if not from our device
-        if (fromId !== deviceId) {
+        if (fromId !== remotePcId) {
           return;
         }
         
@@ -591,7 +630,7 @@ const WynzioWebRTC = (function() {
         socket.emit('message', {
           type: 'answer',
           from: clientId,
-          to: deviceId,
+          to: remotePcId,
           payload: {
             sdp: answer.sdp,
             type: answer.type
@@ -612,11 +651,11 @@ const WynzioWebRTC = (function() {
         // Extract answer from different possible formats
         let answerSdp, answerType, fromId;
         
-        // Format 1: { deviceId, answer: { sdp, type } }
-        if (data.deviceId && data.answer) {
+        // Format 1: { remotePcId, answer: { sdp, type } }
+        if (data.remotePcId && data.answer) {
           answerSdp = data.answer.sdp;
           answerType = data.answer.type;
-          fromId = data.deviceId;
+          fromId = data.remotePcId;
         }
         // Format 2: { from, to, payload: { sdp, type } }
         else if (data.from && data.to && data.payload) {
@@ -630,7 +669,7 @@ const WynzioWebRTC = (function() {
         }
         
         // Skip if not from our device or no peer connection
-        if (fromId !== deviceId || !peerConnection) {
+        if (fromId !== remotePcId || !peerConnection) {
           return;
         }
         
@@ -662,10 +701,10 @@ const WynzioWebRTC = (function() {
         // Extract candidate from different possible formats
         let candidateObj, fromId;
         
-        // Format 1: { deviceId, candidate: { candidate, sdpMLineIndex, sdpMid } }
-        if (data.deviceId && data.candidate) {
+        // Format 1: { remotePcId, candidate: { candidate, sdpMLineIndex, sdpMid } }
+        if (data.remotePcId && data.candidate) {
           candidateObj = data.candidate;
-          fromId = data.deviceId;
+          fromId = data.remotePcId;
         }
         // Format 2: { from, to, payload: { candidate, sdpMLineIndex, sdpMid } }
         else if (data.from && data.to && data.payload) {
@@ -678,7 +717,7 @@ const WynzioWebRTC = (function() {
         }
         
         // Skip if not from our device or no peer connection
-        if (fromId !== deviceId || !peerConnection) {
+        if (fromId !== remotePcId || !peerConnection) {
           return;
         }
         
@@ -709,7 +748,7 @@ const WynzioWebRTC = (function() {
         socket.emit('message', {
           type: 'ice-candidate',
           from: clientId,
-          to: deviceId,
+          to: remotePcId,
           payload: {
             candidate: event.candidate.candidate,
             sdpMLineIndex: event.candidate.sdpMLineIndex,
@@ -920,11 +959,15 @@ const WynzioWebRTC = (function() {
             throw new Error('Command missing required type field');
           }
           
-          // Validate command format based on type
+          // Validate command format based on type - formats match InputService.cs exactly
           switch (command.type) {
             case 'MouseMove':
               if (typeof command.x !== 'number' || typeof command.y !== 'number') {
                 throw new Error('MouseMove command missing x or y coordinates');
+              }
+              // Make sure to include isRelative field - Windows app expects this
+              if (command.isRelative === undefined) {
+                command.isRelative = false;
               }
               break;
             case 'MouseDown':
@@ -982,7 +1025,7 @@ const WynzioWebRTC = (function() {
         if (socket) {
           // When using socket, Windows app expects wrapped format with type and command
           socket.emit('control-command', {
-            deviceId: deviceId,
+            remotePcId: remotePcId,
             command: validatedCommand
           });
           return true;
@@ -998,34 +1041,40 @@ const WynzioWebRTC = (function() {
     /**
      * Convert event coordinates to normalized coordinates
      * @param {Event} event - Mouse or touch event
-     * @returns {Object} Normalized coordinates
+     * @returns {Object|null} Normalized coordinates
      */
     getNormalizedCoordinates(event) {
-      const rect = streamElement.getBoundingClientRect();
-      const scaleX = streamElement.videoWidth / rect.width;
-      const scaleY = streamElement.videoHeight / rect.height;
-      
-      let x, y;
-      
-      if (event.type.startsWith('touch')) {
-        // Touch event
-        if (event.touches.length > 0) {
-          x = (event.touches[0].clientX - rect.left) * scaleX;
-          y = (event.touches[0].clientY - rect.top) * scaleY;
+      try {
+        const rect = streamElement.getBoundingClientRect();
+        const scaleX = streamElement.videoWidth / rect.width;
+        const scaleY = streamElement.videoHeight / rect.height;
+        
+        let x, y;
+        
+        if (event.type.startsWith('touch')) {
+          // Touch event
+          if (event.touches.length > 0) {
+            x = (event.touches[0].clientX - rect.left) * scaleX;
+            y = (event.touches[0].clientY - rect.top) * scaleY;
+          } else {
+            // No touches available
+            return null;
+          }
         } else {
-          // Use last known position
-          return null;
+          // Mouse event
+          x = (event.clientX - rect.left) * scaleX;
+          y = (event.clientY - rect.top) * scaleY;
         }
-      } else {
-        // Mouse event
-        x = (event.clientX - rect.left) * scaleX;
-        y = (event.clientY - rect.top) * scaleY;
+        
+        // Ensure coordinates are non-negative and within bounds
+        x = Math.max(0, Math.min(streamElement.videoWidth, Math.round(x)));
+        y = Math.max(0, Math.min(streamElement.videoHeight, Math.round(y)));
+        
+        return { x, y };
+      } catch (error) {
+        console.error('Error calculating normalized coordinates:', error);
+        return null;
       }
-      
-      return {
-        x: Math.round(x),
-        y: Math.round(y)
-      };
     }
   }
   
@@ -1039,9 +1088,9 @@ const WynzioWebRTC = (function() {
     
     let button;
     switch (event.button) {
-      case 0: button = 'Left'; break;
-      case 1: button = 'Middle'; break;
-      case 2: button = 'Right'; break;
+      case 0: button = 'Left'; break;   // Exact capitalization matches Windows app
+      case 1: button = 'Middle'; break; // Exact capitalization matches Windows app
+      case 2: button = 'Right'; break;  // Exact capitalization matches Windows app
       default: button = 'Left';
     }
     
@@ -1084,8 +1133,8 @@ const WynzioWebRTC = (function() {
     const coords = instance.getNormalizedCoordinates(event);
     if (!coords) return;
     
-    // Throttle mouse move events to reduce load
-    if (!instance.handleMouseMove.lastSent || Date.now() - instance.handleMouseMove.lastSent > 20) {
+    // Throttle mouse move events to reduce load - match Windows app frame rate
+    if (!instance.handleMouseMove.lastSent || Date.now() - instance.handleMouseMove.lastSent > 50) {
       // Format exactly matches Windows InputService.cs
       instance.sendControlCommand({
         type: "MouseMove",
@@ -1107,7 +1156,7 @@ const WynzioWebRTC = (function() {
     // Format exactly matches Windows InputService.cs
     instance.sendControlCommand({
       type: "MouseScroll",
-      scrollDelta: delta * 120 // Match Windows wheel delta
+      scrollDelta: delta
     });
   };
   
@@ -1207,7 +1256,7 @@ const WynzioWebRTC = (function() {
     const coords = instance.getNormalizedCoordinates(event);
     if (!coords) return;
     
-    // Throttle touch move events to reduce load
+    // Throttle touch move events to reduce load - match Windows app frame rate
     if (!instance.handleTouchMove.lastSent || Date.now() - instance.handleTouchMove.lastSent > 50) {
       // Format exactly matches Windows InputService.cs
       instance.sendControlCommand({
