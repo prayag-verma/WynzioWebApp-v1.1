@@ -1,7 +1,7 @@
 /**
  * device-manager.js
  * Handles device management and remote viewer functionality
- * Updated to exactly match Windows app expectations
+ * Updated to fix undefined remotePcId error when viewing device details
  */
 
 // Global variables
@@ -256,9 +256,17 @@ function renderDevices(filteredDevices) {
     
     // Create device cards
     filteredDevices.forEach(device => {
+        // CRITICAL FIX: Ensure device.remotePcId exists before proceeding
+        if (!device.remotePcId) {
+            console.warn('Device without remotePcId found:', device);
+            return; // Skip this device
+        }
+        
         const deviceCard = document.createElement('div');
         deviceCard.className = `device-card ${device.status || 'unknown'}`;
-        deviceCard.dataset.remotePcId = device.remotePcId;
+        
+        // CRITICAL FIX: Consistently use remotePcId as HTML attribute name
+        deviceCard.setAttribute('data-remote-pc-id', device.remotePcId);
         
         // Format last seen time
         const lastSeen = device.lastSeen ? formatTimeAgo(new Date(device.lastSeen)) : 'Never';
@@ -301,6 +309,7 @@ function renderDevices(filteredDevices) {
         
         const detailsBtn = deviceCard.querySelector('.view-details-btn');
         detailsBtn.addEventListener('click', () => {
+            // CRITICAL FIX: Pass the remotePcId directly from the device object
             viewDeviceDetails(device.remotePcId);
         });
         
@@ -313,6 +322,12 @@ function renderDevices(filteredDevices) {
  * Connect to device
  */
 function connectToDevice(remotePcId) {
+    // CRITICAL FIX: Add validation to prevent undefined remotePcId
+    if (!remotePcId) {
+        console.error('Cannot connect to device: remotePcId is undefined');
+        return;
+    }
+    
     // Show remote viewer section
     showRemoteViewerSection();
     
@@ -357,6 +372,18 @@ function showRemoteViewerSection() {
  * View device details
  */
 function viewDeviceDetails(remotePcId) {
+    // CRITICAL FIX: Add validation to prevent undefined remotePcId
+    if (!remotePcId) {
+        console.error('Cannot view device details: remotePcId is undefined');
+        return;
+    }
+    
+    // CRITICAL FIX: Ensure retry button has the remotePcId for reconnection
+    const retryButton = document.getElementById('retry-button');
+    if (retryButton) {
+        retryButton.setAttribute('data-remote-pc-id', remotePcId);
+    }
+    
     // Implement device details modal or page
     // For now, just open connection page
     connectToDevice(remotePcId);
@@ -441,10 +468,18 @@ function initSocketUpdates() {
             if (sid) {
                 storeSessionId(sid);
             }
+            // Log socket reconnection
+            console.log('Socket reconnected');
         });
         
         // Listen for device status updates
         socket.on('device-status-update', (data) => {
+            // CRITICAL FIX: Check if remotePcId exists in update
+            if (!data || !data.remotePcId) {
+                console.warn('Received device status update without remotePcId:', data);
+                return;
+            }
+            
             // Find device in list
             const deviceIndex = devices.findIndex(d => d.remotePcId === data.remotePcId);
             
@@ -454,7 +489,7 @@ function initSocketUpdates() {
                 devices[deviceIndex].lastSeen = data.timestamp;
                 
                 // Update UI if already rendered
-                const deviceCard = document.querySelector(`.device-card[data-remotePcId="${data.remotePcId}"]`);
+                const deviceCard = document.querySelector(`div[data-remote-pc-id="${data.remotePcId}"]`);
                 if (deviceCard) {
                     // Update status classes
                     deviceCard.className = `device-card ${data.status}`;
@@ -495,8 +530,16 @@ function initSocketUpdates() {
         
         // Handle device-list response
         socket.on('device-list', (deviceList) => {
-            // Update devices
-            devices = deviceList;
+            // CRITICAL FIX: Filter out devices without remotePcId
+            if (Array.isArray(deviceList)) {
+                devices = deviceList.filter(device => !!device.remotePcId);
+                if (devices.length < deviceList.length) {
+                    console.warn(`Filtered out ${deviceList.length - devices.length} devices with missing remotePcId`);
+                }
+            } else {
+                console.warn('Received invalid device list:', deviceList);
+                devices = [];
+            }
             
             // Filter and render devices
             filterDevices();
@@ -516,26 +559,29 @@ function initSocketUpdates() {
             console.log('Socket disconnected');
         });
         
-        // Listen for socket reconnect
-        socket.on('connect', () => {
-            console.log('Socket reconnected');
-            
-            // Refetch devices
-            fetchDevices();
-        });
-        
         // Listen for reconnection attempts
         socket.on('reconnect-attempt', (data) => {
+            // CRITICAL FIX: Check if remotePcId exists in reconnect attempt
+            if (!data || !data.remotePcId) {
+                console.warn('Received reconnect attempt without remotePcId:', data);
+                return;
+            }
+            
             console.log(`Reconnection attempt ${data.attempt} for device ${data.remotePcId}`);
             
             // If we're currently viewing this device and not already connecting,
             // try to reconnect
             const retryButton = document.getElementById('retry-button');
-            if (retryButton && retryButton.getAttribute('data-device-id') === data.remotePcId) {
-                if (!isConnecting && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                    console.log('Attempting to reconnect to device...');
-                    reconnectAttempts++;
-                    initViewer(data.remotePcId);
+            if (retryButton) {
+                // CRITICAL FIX: Use consistent attribute name for remotePcId
+                const currentRemotePcId = retryButton.getAttribute('data-remote-pc-id');
+                
+                if (currentRemotePcId === data.remotePcId) {
+                    if (!isConnecting && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                        console.log('Attempting to reconnect to device...');
+                        reconnectAttempts++;
+                        initViewer(data.remotePcId);
+                    }
                 }
             }
         });
@@ -592,10 +638,13 @@ function initViewerControls() {
         const retryButton = document.getElementById('retry-button');
         if (retryButton) {
             retryButton.addEventListener('click', function() {
-                const currentRemotePcId = retryButton.getAttribute('data-device-id');
+                // CRITICAL FIX: Use consistent attribute name for remotePcId
+                const currentRemotePcId = retryButton.getAttribute('data-remote-pc-id');
                 if (currentRemotePcId) {
                     reconnectAttempts = 0; // Reset reconnect attempts
                     initViewer(currentRemotePcId);
+                } else {
+                    console.error('Cannot retry: Missing remotePcId on retry button');
                 }
             });
         }
@@ -622,9 +671,15 @@ function startConnectionMonitoring() {
         if (rtcClient && rtcClient.isConnected()) {
             // Request device status update
             if (viewerSocket) {
-                viewerSocket.emit('device-status-request', {
-                    remotePcId: document.getElementById('retry-button').getAttribute('data-device-id')
-                });
+                // CRITICAL FIX: Use consistent attribute name for remotePcId
+                const retryButton = document.getElementById('retry-button');
+                const remotePcId = retryButton ? retryButton.getAttribute('data-remote-pc-id') : null;
+                
+                if (remotePcId) {
+                    viewerSocket.emit('device-status-request', {
+                        remotePcId: remotePcId
+                    });
+                }
             }
         }
     }, 5000);
@@ -646,6 +701,12 @@ function stopConnectionMonitoring() {
  */
 async function initViewer(remotePcId) {
     try {
+        // CRITICAL FIX: Add validation to prevent undefined remotePcId
+        if (!remotePcId) {
+            showError('Cannot connect: Device ID is missing or undefined');
+            return;
+        }
+        
         // Set connecting state
         isConnecting = true;
         
@@ -663,9 +724,11 @@ async function initViewer(remotePcId) {
         const connectionStatus = document.getElementById('connection-status');
         if (connectionStatus) connectionStatus.textContent = 'Connecting...';
         
-        // Store device ID for retry button
+        // CRITICAL FIX: Store device ID on retry button with consistent attribute name
         const retryButton = document.getElementById('retry-button');
-        if (retryButton) retryButton.setAttribute('data-device-id', remotePcId);
+        if (retryButton) {
+            retryButton.setAttribute('data-remote-pc-id', remotePcId);
+        }
         
         // Disconnect existing connection if any
         disconnectFromDevice();
@@ -870,6 +933,17 @@ async function initViewer(remotePcId) {
  */
 async function fetchDeviceInfo(remotePcId) {
     try {
+        // CRITICAL FIX: Add validation to prevent undefined remotePcId
+        if (!remotePcId) {
+            console.error('Cannot fetch device info: remotePcId is undefined');
+            
+            // Update UI with placeholder information
+            const deviceName = document.getElementById('device-name');
+            if (deviceName) deviceName.textContent = 'Unknown Device';
+            updateDeviceStatus('unknown');
+            return;
+        }
+        
         const response = await fetch(`/api/devices/${remotePcId}`, {
             method: 'GET',
             headers: {
@@ -901,14 +975,14 @@ async function fetchDeviceInfo(remotePcId) {
         
         const data = await response.json();
         
-        if (!data.success) {
+        if (!data.success || !data.device) {
             throw new Error(data.message || 'Failed to fetch device information');
         }
         
         // Update UI with device information
         const deviceName = document.getElementById('device-name');
-        if (deviceName) deviceName.textContent = data.device.systemName;
-        updateDeviceStatus(data.device.status);
+        if (deviceName) deviceName.textContent = data.device.systemName || `Device ${remotePcId}`;
+        updateDeviceStatus(data.device.status || 'unknown');
     } catch (error) {
         console.error('Error fetching device information:', error);
         // Don't throw, just log and continue with fallback
@@ -1109,13 +1183,16 @@ function refreshConnection() {
         const retryButton = document.getElementById('retry-button');
         if (!retryButton) return;
         
-        const remotePcId = retryButton.getAttribute('data-device-id');
+        // CRITICAL FIX: Use consistent attribute name for remotePcId
+        const remotePcId = retryButton.getAttribute('data-remote-pc-id');
         if (remotePcId) {
             // Reset reconnection attempts
             reconnectAttempts = 0;
             
             // Reinitialize viewer
             initViewer(remotePcId);
+        } else {
+            console.error('Cannot refresh connection: Missing remotePcId on retry button');
         }
     } catch (error) {
         console.error('Error refreshing connection:', error);

@@ -27,7 +27,20 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Authorization', 'Content-Type']
 }));
-app.use(express.json());
+
+// Increase JSON payload size limit for larger data transfers
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+
+// Add request logging middleware for debugging API requests
+app.use((req, res, next) => {
+  logger.debug(`${req.method} ${req.url}`, { 
+    headers: req.headers,
+    query: req.query,
+    body: req.method === 'POST' || req.method === 'PUT' ? req.body : undefined
+  });
+  next();
+});
 
 // Add cache control middleware for API responses
 app.use((req, res, next) => {
@@ -59,18 +72,33 @@ app.use((req, res, next) => {
 // Make database available globally for socket auth
 global.db = pool;
 
-// API Routes - ensure these are processed before the static file middleware
+// CORS Preflight for all routes - handle OPTIONS requests
+app.options('*', cors());
+
+// *************** API ROUTES ***************
+// These must be defined BEFORE static file handling
+
+// Health check endpoint
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date(), version: "1.0.0" });
+});
+
+// Mount API route handlers
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/devices", deviceRoutes);
 
 // API 404 handler - specifically for API routes only
 app.use('/api/*', (req, res) => {
+  logger.warn(`API endpoint not found: ${req.method} ${req.url}`);
   res.status(404).json({
     success: false,
     message: "API endpoint not found"
   });
 });
+
+// *************** STATIC CONTENT HANDLING ***************
+// Defined AFTER API routes to prevent conflicts
 
 // Static files - public directory with cache control
 app.use(express.static("public", {
@@ -87,7 +115,7 @@ app.use(express.static("public", {
     } else if (path.match(/\.(jpg|jpeg|png|gif|ico|svg)$/i)) {
       // Static assets can be cached longer (1 day)
       res.setHeader('Cache-Control', 'public, max-age=86400');
-    } 
+    }
     // Default behavior for other resources
   }
 }));
@@ -124,14 +152,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check endpoint
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date() });
-});
-
-// CORS Preflight for all routes - handle OPTIONS requests
-app.options('*', cors());
-
 // Catch-all route for handling 404s
 app.use((req, res) => {
   // Check if request is for an HTML file
@@ -156,7 +176,7 @@ const server = http.createServer(app);
 // Initialize Socket.IO server with existing HTTP server
 // The signalingService should be configured to use the path '/signal'
 // to match Windows app expectations exactly
-const io = signalingService.initialize(server);
+const io = signalingService.initialize(server, { path: '/signal' });
 
 // Database initialization and server startup
 async function startServer() {

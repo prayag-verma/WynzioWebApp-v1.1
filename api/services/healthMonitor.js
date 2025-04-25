@@ -238,6 +238,11 @@ async function saveMonitoringSummary(devices) {
  */
 async function getDeviceHealth(remotePcId, options = {}) {
   try {
+    // CRITICAL FIX: Add validation for remotePcId
+    if (!remotePcId) {
+      throw new Error('Device ID is missing or undefined');
+    }
+    
     const { date, limit } = options;
     const deviceHealthDir = path.join(HEALTH_DATA_DIR, remotePcId);
     

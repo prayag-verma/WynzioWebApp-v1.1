@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Socket.IO Test - Simplified</title>
+  <script src="https://cdn.socket.io/4.6.1/socket.io.min.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      // Status display
+      const status = document.getElementById('status');
+      status.textContent = 'Attempting connection...';
+      
+      // Simple connection with minimal options
+      const socket = io('https://wynzio.com', {
+        path: '/signal',
+        transports: ['polling'],
+        query: {
+          type: 'device',
+          remotePcId: 'simple-test-pc'
+        },
+        auth: {
+          apiKey: '3f7a9b25e8d146c0b2f15a6d90e74c8d'
+        }
+      });
+      
+      // Log all events
+      socket.onAny((event, ...args) => {
+        console.log(`Event: ${event}`, args);
+        const entry = document.createElement('div');
+        entry.textContent = `Event: ${event} - ${JSON.stringify(args)}`;
+        document.getElementById('events').appendChild(entry);
+      });
+      
+      // Connection events
+      socket.on('connect', () => {
+        status.textContent = 'Connected: ' + socket.id;
+        status.style.color = 'green';
+      });
+      
+      socket.on('connect_error', (err) => {
+        status.textContent = 'Connection error: ' + err.message;
+        status.style.color = 'red';
+        console.error('Connection error:', err);
+      });
+      
+      socket.on('disconnect', (reason) => {
+        status.textContent = 'Disconnected: ' + reason;
+        status.style.color = 'orange';
+      });
+      
+      // Add test buttons
+      document.getElementById('pingBtn').addEventListener('click', () => {
+        socket.emit('ping', {});
+        console.log('Sent ping');
+      });
+      
+      document.getElementById('registerBtn').addEventListener('click', () => {
+        socket.emit('auto-register', {
+          remotePcId: 'simple-test-pc',
+          systemName: 'Simple Test PC',
+          apiKey: '3f7a9b25e8d146c0b2f15a6d90e74c8d',
+          OSName: 'Windows',
+          OSversion: '10.0.19045'
+        });
+        console.log('Sent auto-register');
+      });
+    });
+  </script>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    #status { font-weight: bold; margin-bottom: 10px; }
+    button { margin: 5px; padding: 8px; }
+    #events { margin-top: 20px; border: 1px solid #ccc; padding: 10px; max-height: 300px; overflow-y: auto; }
+  </style>
+</head>
+<body>
+  <h1>Socket.IO Test - Simplified</h1>
+  <div id="status">Not connected</div>
+  <div>
+    <button id="pingBtn">Send Ping</button>
+    <button id="registerBtn">Send Auto-Register</button>
+  </div>
+  <h3>Events:</h3>
+  <div id="events"></div>
+</body>
+</html>

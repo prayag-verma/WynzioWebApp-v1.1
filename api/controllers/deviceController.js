@@ -1,7 +1,7 @@
 /**
  * Device Controller
  * Handles API endpoints for device management
- * Updated to use remotePcId consistently with Windows app
+ * Updated to fix undefined remotePcId error
  */
 const deviceManager = require('../services/deviceManager');
 const healthMonitor = require('../services/healthMonitor');
@@ -143,6 +143,14 @@ exports.getDeviceById = async (req, res) => {
   try {
     const { remotePcId } = req.params;
     
+    // CRITICAL FIX: Add validation for remotePcId
+    if (!remotePcId) {
+      return res.status(404).json({
+        success: false,
+        message: "Device ID is missing or undefined"
+      });
+    }
+    
     // Get device
     const device = await deviceManager.getDeviceByRemotePcId(remotePcId);
     
@@ -188,6 +196,14 @@ exports.updateDeviceStatus = async (req, res) => {
   try {
     const { remotePcId } = req.params;
     const { status } = req.body;
+    
+    // CRITICAL FIX: Add validation for remotePcId
+    if (!remotePcId) {
+      return res.status(404).json({
+        success: false,
+        message: "Device ID is missing or undefined"
+      });
+    }
     
     // Validate status
     if (!status || !['online', 'offline', 'idle'].includes(status)) {
@@ -236,6 +252,14 @@ exports.getDeviceHealth = async (req, res) => {
     const { remotePcId } = req.params;
     const { date, limit } = req.query;
     
+    // CRITICAL FIX: Add validation for remotePcId
+    if (!remotePcId) {
+      return res.status(404).json({
+        success: false,
+        message: "Device ID is missing or undefined"
+      });
+    }
+    
     // Validate device exists
     try {
       await deviceManager.getDeviceByRemotePcId(remotePcId);
@@ -275,6 +299,14 @@ exports.getDeviceLogs = async (req, res) => {
   try {
     const { remotePcId } = req.params;
     const { date, limit } = req.query;
+    
+    // CRITICAL FIX: Add validation for remotePcId
+    if (!remotePcId) {
+      return res.status(404).json({
+        success: false,
+        message: "Device ID is missing or undefined"
+      });
+    }
     
     // Validate device exists
     try {
@@ -317,21 +349,18 @@ exports.initiateConnection = async (req, res) => {
     // For testing, make user ID optional
     const userId = req.user ? req.user.id : 'admin-user';
     
+    // CRITICAL FIX: Add validation for remotePcId
+    if (!remotePcId) {
+      return res.status(404).json({
+        success: false,
+        message: "Device ID is missing or undefined"
+      });
+    }
+    
     // Validate device exists
     let device;
     try {
       device = await deviceManager.getDeviceByRemotePcId(remotePcId);
-      
-      // For testing, force status to online
-      // device.status = 'online';
-      
-      // Skip status check for testing
-      // if (device.status !== 'online') {
-      //   return res.status(400).json({
-      //     success: false,
-      //     message: `Device is not online (current status: ${device.status})`
-      //   });
-      // }
     } catch (err) {
       return res.status(404).json({
         success: false,

@@ -1,8 +1,7 @@
 /**
  * Device Manager Service
  * Handles device registration, status tracking, and data management
- * Modified to use file-based storage for Windows app compatibility
- * Updated to use remotePcId consistently with Windows app
+ * Modified to fix device detail view error
  */
 const fs = require('fs').promises;
 const path = require('path');
@@ -126,6 +125,11 @@ class DeviceManager {
    */
   async getDeviceByRemotePcId(remotePcId) {
     try {
+      // CRITICAL FIX: Add validation for remotePcId to prevent undefined parameter
+      if (!remotePcId) {
+        throw new Error('Device ID is missing or undefined');
+      }
+      
       // Check cache first
       if (this.deviceCache.has(remotePcId)) {
         return this.deviceCache.get(remotePcId);
@@ -135,6 +139,11 @@ class DeviceManager {
       const deviceFilePath = path.join(DEVICE_DATA_DIR, `${remotePcId}.json`);
       const data = await fs.readFile(deviceFilePath, 'utf8');
       const device = JSON.parse(data);
+      
+      // CRITICAL FIX: Ensure the device has a remotePcId field set
+      if (!device.remotePcId) {
+        device.remotePcId = remotePcId;
+      }
       
       // Update cache
       this.deviceCache.set(remotePcId, device);
@@ -164,6 +173,12 @@ class DeviceManager {
           
           // Get device data
           const device = await this.getDeviceByRemotePcId(remotePcId);
+          
+          // CRITICAL FIX: Ensure the device has a remotePcId field set
+          if (!device.remotePcId) {
+            device.remotePcId = remotePcId;
+          }
+          
           devices.push(device);
         } catch (err) {
           // Skip invalid files
@@ -200,6 +215,11 @@ class DeviceManager {
    */
   async updateDeviceStatus(remotePcId, status) {
     try {
+      // CRITICAL FIX: Add validation for remotePcId to prevent undefined parameter
+      if (!remotePcId) {
+        throw new Error('Device ID is missing or undefined');
+      }
+      
       // Validate status
       if (!['online', 'offline', 'idle'].includes(status)) {
         throw new Error('Invalid status value. Must be online, offline, or idle.');
@@ -245,6 +265,11 @@ class DeviceManager {
    */
   async updateDeviceLastSeen(remotePcId) {
     try {
+      // CRITICAL FIX: Add validation for remotePcId to prevent undefined parameter
+      if (!remotePcId) {
+        throw new Error('Device ID is missing or undefined');
+      }
+      
       // Get current device data
       const device = await this.getDeviceByRemotePcId(remotePcId);
       
@@ -272,6 +297,11 @@ class DeviceManager {
    */
   async detectDeviceStatus(remotePcId) {
     try {
+      // CRITICAL FIX: Add validation for remotePcId to prevent undefined parameter
+      if (!remotePcId) {
+        throw new Error('Device ID is missing or undefined');
+      }
+      
       // Get current device data
       const device = await this.getDeviceByRemotePcId(remotePcId);
       
@@ -338,6 +368,11 @@ class DeviceManager {
     try {
       const { remotePcId, userId, requestId, timestamp } = requestData;
       
+      // CRITICAL FIX: Add validation for remotePcId to prevent undefined parameter
+      if (!remotePcId) {
+        throw new Error('Device ID is missing or undefined');
+      }
+      
       // Create log entry
       const logEntry = {
         id: requestId || uuidv4(),
@@ -381,6 +416,11 @@ class DeviceManager {
    */
   async getDeviceLogs(remotePcId, options = {}) {
     try {
+      // CRITICAL FIX: Add validation for remotePcId to prevent undefined parameter
+      if (!remotePcId) {
+        throw new Error('Device ID is missing or undefined');
+      }
+      
       const { date, limit } = options;
       
       // Determine which date to use
