@@ -388,7 +388,7 @@ const WynzioWebRTC = (function() {
           // Notify connecting
           connectionCallbacks.onConnecting();
           
-          // Create peer connection with configuration matching Windows app's WebRTCService.cs
+          // Create peer connection with configuration matching Windows app
           peerConnection = new RTCPeerConnection(config);
           
           // Set up event handlers
@@ -409,6 +409,11 @@ const WynzioWebRTC = (function() {
           
           // Apply codec preferences - matching Windows app's VP8 restriction
           this.applyCodecPreferences(peerConnection);
+          
+          // Add video transceivers for screen sharing (this is the key change)
+          peerConnection.addTransceiver('video', {
+            direction: 'recvonly'
+          });
           
           // Create offer with configuration matching SIPSorcery in Windows app
           const offer = await peerConnection.createOffer({
