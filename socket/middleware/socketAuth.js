@@ -96,10 +96,17 @@ async function authenticateDevice(socket, next) {
     
     // Check for session reuse if sid provided - added for Windows app compatibility
     const sid = socket.handshake.auth.sid;
-    if (sid && signalingService.isSessionValid(sid)) {
-      logger.info(`Reusing valid session for device ${remotePcId}`);
-      // Extend session
-      signalingService.extendSession(sid);
+    if (sid) {
+      if (signalingService.isSessionValid(sid)) {
+        logger.info(`Reusing valid session for device ${remotePcId}`);
+        // Extend session
+        signalingService.extendSession(sid);
+        // Also store connection mapping for better reconnection
+        signalingService.storeConnection(remotePcId, sid);
+      } else {
+        // Don't reject immediately, let Windows app fall back to new handshake
+        logger.info(`Invalid or expired session for device ${remotePcId}, will use new handshake`);
+      }
     }
     
     // Validate API key against config and handle multiple formats

@@ -43,6 +43,8 @@ class SignalingService {
     this.reconnectTimers = new Map();
     // Store session expirations (SID validity) - Added for Windows app compatibility
     this.sessionExpirations = new Map();
+    // Store device to session mappings for better reconnection handling
+    this.deviceSessions = new Map();
   }
 
   /**
@@ -140,6 +142,11 @@ class SignalingService {
     
     // Set session expiration (24 hours from now) - added for Windows app compatibility
     this.sessionExpirations.set(socket.id, Date.now() + SESSION_TIMEOUT);
+    
+    // Store device session mapping if device type
+    if (remotePcId) {
+      this.storeConnection(remotePcId, socket.id);
+    }
     
     // Handle device client (Windows app)
     if (clientType === 'device') {
@@ -958,6 +965,17 @@ class SignalingService {
         return true;
       }
       
+      // Check active connections for this session ID
+      if (Array.from(this.activeConnections.keys()).some(key => 
+        key === sid || this.activeConnections.get(key).id === sid)) {
+        return true;
+      }
+      
+      // Check if we have this session in the device mappings
+      if (Array.from(this.deviceSessions.values()).includes(sid)) {
+        return true;
+      }
+      
       // Try to parse sid as a session object (matching Windows app format)
       let sessionObj;
       
@@ -970,7 +988,7 @@ class SignalingService {
       
       // If we have a timestamp (from SessionManager.cs format)
       if (sessionObj && sessionObj.Timestamp) {
-        const timestamp = sessionObj.Timestamp;
+        const timestamp = parseInt(sessionObj.Timestamp, 10);
         return !isNaN(timestamp) && (Date.now() - timestamp < SESSION_TIMEOUT);
       } else if (sessionObj && sessionObj.Sid) {
         // Use Sid property directly
@@ -992,6 +1010,23 @@ class SignalingService {
       this.sessionExpirations.set(sid, Date.now() + SESSION_TIMEOUT);
       logger.debug(`Session extended: ${sid}`);
     }
+  }
+  
+  /**
+   * Store connection mapping for better reconnection handling
+   * @param {string} remotePcId - Device ID 
+   * @param {string} sid - Session ID
+   */
+  storeConnection(remotePcId, sid) {
+    if (!remotePcId || !sid) return;
+    
+    // Update session expiration time
+    this.sessionExpirations.set(sid, Date.now() + SESSION_TIMEOUT);
+    
+    // Create mapping from device to session
+    this.deviceSessions.set(remotePcId, sid);
+    
+    logger.debug(`Stored connection mapping: ${remotePcId} -> ${sid}`);
   }
 }
 
