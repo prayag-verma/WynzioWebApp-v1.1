@@ -733,6 +733,14 @@ async function initViewer(remotePcId) {
         // Disconnect existing connection if any
         disconnectFromDevice();
         
+        // Clear any reconnection timers
+        for (let i = 0; i < 100; i++) {
+            clearTimeout(i);
+        }
+
+        // Reset reconnection attempts
+        reconnectAttempts = 0;
+        
         // Fetch device information
         await fetchDeviceInfo(remotePcId);
         
@@ -847,12 +855,25 @@ async function initViewer(remotePcId) {
                     const delay = RECONNECT_INTERVAL;
                     console.log(`Scheduling reconnection attempt ${reconnectAttempts + 1} in ${delay/1000}s`);
                     
+                    // Store current remotePcId for reconnection
+                    const currentRemotePcId = remotePcId;
+                    
                     setTimeout(() => {
                         reconnectAttempts++;
-                        // Check if device is still online before attempting to reconnect
-                        viewerSocket.emit('device-status-request', {
-                            remotePcId: remotePcId
-                        });
+                        
+                        // Store a reference to viewerSocket before disconnecting
+                        const socketRef = viewerSocket;
+                        
+                        // Check if we still have a valid socket before trying to emit
+                        if (socketRef && socketRef.connected) {
+                            // Check if device is still online before attempting to reconnect
+                            socketRef.emit('device-status-request', {
+                                remotePcId: currentRemotePcId
+                            });
+                        } else {
+                            // If socket is gone, try to reconnect directly
+                            initViewer(currentRemotePcId);
+                        }
                     }, delay);
                 }
             },
@@ -1228,16 +1249,30 @@ function disconnectFromDevice() {
         // Stop connection monitoring
         stopConnectionMonitoring();
         
+        // Make a safe local copy of rtcClient and viewerSocket before nullifying them
+        const rtcClientRef = rtcClient;
+        const viewerSocketRef = viewerSocket;
+        
+        // Clear the global references first
+        rtcClient = null;
+        viewerSocket = null;
+        
         // Disconnect WebRTC if active
-        if (rtcClient) {
-            rtcClient.disconnect();
-            rtcClient = null;
+        if (rtcClientRef) {
+            try {
+                rtcClientRef.disconnect();
+            } catch (error) {
+                console.warn('Error disconnecting WebRTC client:', error);
+            }
         }
         
         // Disconnect socket if active
-        if (viewerSocket) {
-            viewerSocket.disconnect();
-            viewerSocket = null;
+        if (viewerSocketRef) {
+            try {
+                viewerSocketRef.disconnect();
+            } catch (error) {
+                console.warn('Error disconnecting socket:', error);
+            }
         }
         
         // Clear session timer if active
