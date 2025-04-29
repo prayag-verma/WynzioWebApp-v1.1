@@ -30,7 +30,7 @@ const AppConfig = (function() {
         
         // Socket.IO connection configuration - updated to match Windows app exactly
         socketIo: {
-            path: '/signal', // Changed from '/socket.io' to '/signal' to match Windows app
+            path: '/signal/', // Changed from '/socket.io' to '/signal/' to match Windows app
             pingInterval: parseInt(process.env.SOCKET_PING_INTERVAL || "25000", 10), // 25 seconds - match Windows app
             pingTimeout: parseInt(process.env.SOCKET_PING_TIMEOUT || "20000", 10), // 20 seconds
             sessionTimeout: parseInt(process.env.SESSION_TIMEOUT || "86400000", 10), // 24 hours - match Windows app SessionManager.cs

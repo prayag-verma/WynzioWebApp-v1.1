@@ -174,9 +174,9 @@ app.use((req, res) => {
 const server = http.createServer(app);
 
 // Initialize Socket.IO server with existing HTTP server
-// The signalingService should be configured to use the path '/signal'
+// The signalingService should be configured to use the path '/signal/'
 // to match Windows app expectations exactly
-const io = signalingService.initialize(server, { path: '/signal' });
+const io = signalingService.initialize(server, { path: '/signal/' });
 
 // Database initialization and server startup
 async function startServer() {
@@ -200,7 +200,7 @@ async function startServer() {
     server.listen(port, () => {
       logger.info(`Server running on port ${port}`);
       logger.info(`Visit http://localhost:${port} to access the application`);
-      logger.info(`Socket.IO configured on path '/signal' for Windows app compatibility`);
+      logger.info(`Socket.IO configured on path '/signal/' for Windows app compatibility`);
       
       // Log environment mode
       logger.info(`Running in ${process.env.NODE_ENV || 'production'} mode`);

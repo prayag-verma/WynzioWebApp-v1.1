@@ -356,7 +356,7 @@ const WynzioWebRTC = (function() {
      * @param {String} targetRemotePcId - Device ID to connect to
      * @returns {Promise} Connection result
      */
-    async connect(targetRemotePcId) {
+    connect(targetRemotePcId) {
       return new Promise(async (resolve, reject) => {
         try {
           // Validate requirements
@@ -441,7 +441,16 @@ const WynzioWebRTC = (function() {
             if (isConnecting && !isConnected) {
               isConnecting = false;
               connectionCallbacks.onError('Connection timeout');
-              peerConnection.close();
+              
+              if (peerConnection) {
+                try {
+                  peerConnection.close();
+                } catch (e) {
+                  // Ignore errors
+                }
+                peerConnection = null;
+              }
+              
               reject(new Error('Connection timeout'));
             }
           }, 30000); // 30 second timeout
@@ -524,13 +533,20 @@ const WynzioWebRTC = (function() {
     handleConnectionFailure(reason) {
       console.warn(`Connection failure: ${reason}`);
       
-      // Only attempt reconnect if we were previously connected
-      if (!isConnected) return;
+      // Only attempt reconnect if we were previously connected or still trying to connect
+      if (!isConnected && !isConnecting) return;
       
+      // Update state
       isConnected = false;
+      isConnecting = false;
       
       // Notify disconnection
       connectionCallbacks.onDisconnected(reason);
+      
+      // Check if device is still online before attempting reconnection
+      if (socket) {
+        socket.emit('device-status-request', { remotePcId });
+      }
       
       // Attempt reconnection with interval matching Windows app ConnectionSettings.cs
       if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
@@ -545,6 +561,36 @@ const WynzioWebRTC = (function() {
         // Schedule reconnection
         reconnectTimeout = setTimeout(() => {
           reconnectAttempts++;
+          
+          // Close existing peer connection properly
+          if (peerConnection) {
+            try {
+              // Close all transceivers
+              const transceivers = peerConnection.getTransceivers();
+              transceivers.forEach(transceiver => {
+                if (transceiver.stop) {
+                  transceiver.stop();
+                }
+              });
+              
+              peerConnection.close();
+            } catch (err) {
+              // Ignore errors closing connection
+            }
+            peerConnection = null;
+          }
+          
+          // Close data channel
+          if (dataChannel) {
+            try {
+              dataChannel.close();
+            } catch (err) {
+              // Ignore errors
+            }
+            dataChannel = null;
+          }
+          
+          // Create a fresh connection
           this.connect(remotePcId).catch(err => {
             console.error('Reconnection attempt failed:', err);
           });
@@ -873,6 +919,7 @@ const WynzioWebRTC = (function() {
           if (!isConnected) {
             isConnected = true;
             isConnecting = false;
+            reconnectAttempts = 0; // Reset reconnect attempts on successful connection
             connectionCallbacks.onConnected();
           }
           break;
@@ -886,8 +933,16 @@ const WynzioWebRTC = (function() {
           }
           break;
         case 'disconnected':
-          // Wait for reconnection attempt by ICE layer
+          // Wait for reconnection attempt by ICE layer, but prepare for potential failure
           console.warn('ICE connection disconnected, waiting for recovery');
+          
+          // Set a timer to check if we recover automatically
+          setTimeout(() => {
+            if (peerConnection && peerConnection.iceConnectionState === 'disconnected') {
+              // Still disconnected after delay, try to force reconnection
+              this.handleConnectionFailure('ICE connection recovery timeout');
+            }
+          }, 5000); // Wait 5 seconds for auto-recovery
           break;
         case 'closed':
           if (isConnected) {
@@ -912,6 +967,7 @@ const WynzioWebRTC = (function() {
           if (!isConnected) {
             isConnected = true;
             isConnecting = false;
+            reconnectAttempts = 0; // Reset reconnect attempts on successful connection
             connectionCallbacks.onConnected();
           }
           break;
@@ -922,6 +978,13 @@ const WynzioWebRTC = (function() {
           } else if (isConnecting) {
             isConnecting = false;
             connectionCallbacks.onError('Connection failed during setup');
+            
+            // Check if the device is still online
+            if (socket) {
+              socket.emit('device-status-request', {
+                remotePcId: remotePcId
+              });
+            }
           }
           break;
         case 'closed':

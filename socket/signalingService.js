@@ -64,8 +64,8 @@ class SignalingService {
       transports: ['polling', 'websocket'],
       // Make Socket.IO format compatible with Windows app
       allowEIO3: true,
-      // Path must match Windows app SignalingService.cs -> '/signal'
-      path: '/signal'
+      // Path must match Windows app SignalingService.cs -> '/signal/'
+      path: '/signal/'
     });
 
     // Authentication middleware
@@ -79,7 +79,7 @@ class SignalingService {
     // Start health monitoring
     this.startMonitoring();
 
-    logger.info('WebSocket signaling service initialized with /signal path');
+    logger.info('WebSocket signaling service initialized with /signal/ path');
     return this.io;
   }
 
@@ -161,7 +161,10 @@ class SignalingService {
     socket.on('disconnect', (reason) => {
       if (remotePcId) {
         logger.info(`Device disconnected: ${remotePcId}, reason: ${reason}`);
-        this.activeConnections.delete(remotePcId);
+        
+        // Don't immediately remove from active connections - keep it for reconnection grace period
+        // Instead, mark last disconnect time for cleanup during monitoring
+        this.connectionTimestamps.set(remotePcId, Date.now() - RECONNECT_BASE_DELAY); // Mark as potentially reconnecting
         
         // Update status for devices
         deviceManager.updateDeviceStatus(remotePcId, 'offline')
@@ -202,6 +205,9 @@ class SignalingService {
         // Reset reconnection attempts
         this.reconnectAttempts.set(remotePcId, 0);
         
+        // Ensure device is in activeConnections
+        this.activeConnections.set(remotePcId, socket);
+        
         // Update device status if reconnected
         deviceManager.updateDeviceStatus(remotePcId, 'online')
           .then(() => {
@@ -229,6 +235,71 @@ class SignalingService {
       } else {
         logger.warn(`Client ${clientId} failed to reconnect after max attempts`);
       }
+    });
+  }
+
+  /**
+   * Monitor device connection
+   * @param {String} remotePcId - Device ID
+   */
+  monitorDeviceConnection(remotePcId) {
+    if (!remotePcId || !this.activeConnections.has(remotePcId)) return;
+    
+    const socket = this.activeConnections.get(remotePcId);
+    
+    // Log connection details initially
+    logger.info(`Monitoring device connection: ${remotePcId}, transport: ${socket.conn.transport.name}`);
+    
+    // Add packet monitoring to track exactly what's happening with the WebSocket
+    socket.conn.on('packet', (packet) => {
+      // Only log important packets to avoid excessive logging
+      if (packet.type === 0) { // Engine.IO open packet
+        logger.info(`Device ${remotePcId} - Received Engine.IO open packet`);
+      } else if (packet.type === 4) { // Engine.IO message packet
+        if (packet.data.startsWith('0')) { // Socket.IO connect packet
+          logger.info(`Device ${remotePcId} - Socket.IO namespace connected`);
+        } else if (packet.data.startsWith('4')) { // Socket.IO disconnect packet
+          logger.info(`Device ${remotePcId} - Socket.IO namespace disconnected`);
+        } else if (packet.data.startsWith('2')) { // Socket.IO event packet
+          // Only log if it contains specific keywords indicating issues
+          const packetData = packet.data.substring(2);
+          try {
+            const eventData = JSON.parse(packetData);
+            const eventName = eventData[0];
+            if (eventName === 'error' || eventName === 'connect_error' || eventName === 'reconnect_error') {
+              logger.warn(`Device ${remotePcId} - Socket.IO error event: ${packetData}`);
+            }
+          } catch (e) {
+            // Ignore parsing errors for non-JSON packets
+          }
+        }
+      } else if (packet.type === 2) { // Engine.IO ping packet
+        // Log every 5th ping for monitoring without excessive logs
+        if (this._pingCounter === undefined) this._pingCounter = 0;
+        this._pingCounter++;
+        if (this._pingCounter % 5 === 0) {
+          logger.debug(`Device ${remotePcId} - Engine.IO ping sent`);
+        }
+      } else if (packet.type === 3) { // Engine.IO pong packet
+        if (this._pingCounter % 5 === 0) {
+          logger.debug(`Device ${remotePcId} - Engine.IO pong received`);
+        }
+      } else if (packet.type === 1) { // Engine.IO close packet
+        logger.warn(`Device ${remotePcId} - Engine.IO close packet received`);
+      }
+    });
+    
+    // Monitor for specific transport-level events
+    socket.conn.transport.on('error', (err) => {
+      logger.error(`Device ${remotePcId} - Transport error: ${err.message || 'Unknown'}`);
+    });
+    
+    socket.conn.on('upgrade', (transport) => {
+      logger.info(`Device ${remotePcId} - Transport upgraded from ${socket.conn.transport.name} to ${transport.name}`);
+    });
+    
+    socket.conn.on('close', (reason) => {
+      logger.warn(`Device ${remotePcId} - Connection closed: ${reason}`);
     });
   }
 
@@ -286,6 +357,9 @@ class SignalingService {
     // Store connection
     this.activeConnections.set(remotePcId, socket);
     this.connectionTimestamps.set(remotePcId, Date.now());
+
+    // Start connection monitoring
+    this.monitorDeviceConnection(remotePcId);
 
     // Auto-register handler - matches Windows app SignalingService.cs format exactly
     socket.on('auto-register', async (deviceInfo) => {
@@ -642,6 +716,16 @@ class SignalingService {
         logger.error('Error retrieving device list:', error);
       });
 
+    // Handle device list request
+    socket.on('device-list-request', async () => {
+      try {
+        const devices = await deviceManager.getOnlineDevices();
+        socket.emit('device-list', devices);
+      } catch (error) {
+        logger.error('Error retrieving device list:', error);
+      }
+    });
+
     // Handle connection request
     socket.on('request-connection', async (data) => {
       try {
@@ -655,8 +739,37 @@ class SignalingService {
           return;
         }
         
-        const deviceSocket = this.activeConnections.get(remotePcId);
+        // Try to find the device in active connections
+        let deviceSocket = this.activeConnections.get(remotePcId);
         
+        // If device socket not found, try to see if it exists in database and is marked online
+        if (!deviceSocket) {
+          try {
+            // Get device from database
+            const device = await deviceManager.getDeviceByRemotePcId(remotePcId);
+            
+            // If device exists and is marked as online, try to restore connection
+            if (device && device.status === 'online') {
+              // Check if we have a session mapping for this device
+              const sessionId = this.deviceSessions.get(remotePcId);
+              
+              if (sessionId && this.io.sockets && this.io.sockets.sockets) {
+                deviceSocket = this.io.sockets.sockets.get(sessionId);
+                
+                if (deviceSocket) {
+                  logger.info(`Restored connection for device ${remotePcId} from session mapping`);
+                  // Update active connections map
+                  this.activeConnections.set(remotePcId, deviceSocket);
+                }
+              }
+            }
+          } catch (err) {
+            // Device not found in database, continue with error response
+            logger.warn(`Device ${remotePcId} not found in database`);
+          }
+        }
+        
+        // If device socket still not found, send error
         if (!deviceSocket) {
           socket.emit('connection-error', {
             requestId,
@@ -709,10 +822,29 @@ class SignalingService {
         const targetSocket = this.activeConnections.get(targetId);
         if (!targetSocket) {
           logger.warn(`Target not found for message ${messageType} from ${senderId} to ${targetId}`);
-          socket.emit('connection-error', {
-            error: `Target device ${targetId} not connected`
-          });
-          return;
+          
+          // FIX: Try to check if there is a stored session for this device
+          const sessionId = this.deviceSessions.get(targetId);
+          let restoredSocket = null;
+          
+          if (sessionId && this.io.sockets && this.io.sockets.sockets) {
+            restoredSocket = this.io.sockets.sockets.get(sessionId);
+            
+            if (restoredSocket) {
+              logger.info(`Restored connection for device ${targetId} during message routing`);
+              // Update active connections map
+              this.activeConnections.set(targetId, restoredSocket);
+              targetSocket = restoredSocket;
+            }
+          }
+          
+          // If we still couldn't find the socket, return error
+          if (!targetSocket) {
+            socket.emit('connection-error', {
+              error: `Target device ${targetId} not connected`
+            });
+            return;
+          }
         }
         
         // Format message to match exactly what Windows app expects
@@ -755,6 +887,33 @@ class SignalingService {
             }
           });
         } else {
+          // Try to find the socket through session mapping
+          const sessionId = this.deviceSessions.get(targetId);
+          let restoredSocket = null;
+          
+          if (sessionId && this.io.sockets && this.io.sockets.sockets) {
+            restoredSocket = this.io.sockets.sockets.get(sessionId);
+            
+            if (restoredSocket) {
+              logger.info(`Restored connection for device ${targetId} during offer`);
+              // Update active connections map
+              this.activeConnections.set(targetId, restoredSocket);
+              
+              // Send offer with restored socket
+              restoredSocket.emit('message', {
+                type: 'offer',
+                from: userId,
+                to: targetId,
+                payload: {
+                  sdp: offer.sdp,
+                  type: offer.type
+                }
+              });
+              return;
+            }
+          }
+          
+          // If we still couldn't find the socket, return error
           socket.emit('connection-error', {
             error: `Target device ${targetId} not connected`
           });
@@ -878,6 +1037,42 @@ class SignalingService {
   }
 
   /**
+   * Handle connection request with socket
+   * @param {Object} clientSocket - Client socket
+   * @param {Object} deviceSocket - Device socket
+   * @param {String} userId - User ID
+   * @param {String} remotePcId - Remote PC ID
+   * @param {String} requestId - Request ID
+   */
+  async handleConnectionRequestWithSocket(clientSocket, deviceSocket, userId, remotePcId, requestId) {
+    try {
+      // Log connection request
+      await deviceManager.logConnectionRequest({
+        remotePcId,
+        userId,
+        requestId,
+        timestamp: new Date()
+      });
+
+      // Format message as Windows app expects
+      deviceSocket.emit('message', {
+        type: 'remote-control-request',
+        from: userId,
+        to: remotePcId,
+        payload: {
+          requestId,
+          peerId: userId
+        }
+      });
+    } catch (error) {
+      logger.error('Connection request with socket error:', error);
+      clientSocket.emit('connection-error', {
+        error: error.message
+      });
+    }
+  }
+
+  /**
    * Monitor and maintain active connections
    */
   monitorConnections() {
@@ -900,6 +1095,21 @@ class SignalingService {
             timestamp: new Date().toISOString()
           });
         }
+        
+        // If device was offline but is now online (based on detectDeviceStatus), 
+        // update active connections if needed
+        if (device.status === 'online' && !this.activeConnections.has(remotePcId)) {
+          // Check if we have a session mapping for this device
+          const sid = this.deviceSessions.get(remotePcId);
+          if (sid && this.io && this.io.sockets && this.io.sockets.sockets) {
+            const socket = this.io.sockets.sockets.get(sid);
+            if (socket) {
+              // Update active connections map
+              this.activeConnections.set(remotePcId, socket);
+              logger.info(`Restored connection for device ${remotePcId} using session ${sid}`);
+            }
+          }
+        }
       } catch (error) {
         // Handle error silently - device might have been deleted
         logger.debug(`Error monitoring device ${remotePcId}: ${error.message}`);
@@ -908,8 +1118,16 @@ class SignalingService {
     
     // Clean up old timestamps for devices that are no longer connected
     this.connectionTimestamps.forEach((timestamp, remotePcId) => {
+      // Don't remove if still in active connections
       if (!this.activeConnections.has(remotePcId)) {
-        this.connectionTimestamps.delete(remotePcId);
+        // Check if we should consider it really gone
+        const timeSinceUpdate = now - timestamp;
+        if (timeSinceUpdate > SESSION_TIMEOUT) {
+          this.connectionTimestamps.delete(remotePcId);
+          // Also clean up session mapping
+          this.deviceSessions.delete(remotePcId);
+          logger.debug(`Removed stale device: ${remotePcId}`);
+        }
       }
     });
     
@@ -918,6 +1136,14 @@ class SignalingService {
       if (now > expiration) {
         this.sessionExpirations.delete(sid);
         logger.debug(`Session expired: ${sid}`);
+        
+        // Also check if any device was using this session
+        for (const [deviceId, deviceSid] of this.deviceSessions.entries()) {
+          if (deviceSid === sid) {
+            this.deviceSessions.delete(deviceId);
+            logger.debug(`Removed device session mapping for ${deviceId}`);
+          }
+        }
       }
     });
   }
@@ -966,9 +1192,11 @@ class SignalingService {
       }
       
       // Check active connections for this session ID
-      if (Array.from(this.activeConnections.keys()).some(key => 
-        key === sid || this.activeConnections.get(key).id === sid)) {
-        return true;
+      if (this.io && this.io.sockets && this.io.sockets.sockets) {
+        const socket = this.io.sockets.sockets.get(sid);
+        if (socket) {
+          return true;
+        }
       }
       
       // Check if we have this session in the device mappings
@@ -1025,6 +1253,18 @@ class SignalingService {
     
     // Create mapping from device to session
     this.deviceSessions.set(remotePcId, sid);
+    
+    // Also update the active connections map if it's not already there
+    if (!this.activeConnections.has(remotePcId) && this.io) {
+      // Find the socket by session ID
+      if (this.io.sockets && this.io.sockets.sockets) {
+        const socket = this.io.sockets.sockets.get(sid);
+        if (socket) {
+          this.activeConnections.set(remotePcId, socket);
+          logger.info(`Updated active connection for device ${remotePcId} using session ${sid}`);
+        }
+      }
+    }
     
     logger.debug(`Stored connection mapping: ${remotePcId} -> ${sid}`);
   }

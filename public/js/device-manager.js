@@ -446,7 +446,7 @@ function initSocketUpdates() {
         
         // Connect to Socket.IO server with client ID matching Windows app expectations
         const socket = io('', {
-            path: '/signal', // Updated to match Windows app's SignalingService.cs path
+            path: '/signal/', // Updated to match Windows app's SignalingService.cs path
             query: {
                 type: 'dashboard',
                 clientId: clientId // Use the persistent client ID
@@ -741,7 +741,7 @@ async function initViewer(remotePcId) {
         
         // Connect to Socket.IO server with consistent client ID
         viewerSocket = io('', {
-            path: '/signal', // Updated to match Windows app SignalingService.cs
+            path: '/signal/', // Updated to match Windows app SignalingService.cs
             query: {
                 type: 'dashboard',
                 clientId: clientId // Use the persistent client ID
@@ -777,6 +777,16 @@ async function initViewer(remotePcId) {
             
             // Clear timeout on connect
             viewerSocket.on('connect', () => clearTimeout(timeout));
+        });
+        
+        // Add event listener for device status updates
+        viewerSocket.on('device-status-update', (data) => {
+            if (data.remotePcId === remotePcId && data.status === 'online' && 
+                rtcClient && rtcClient.isConnecting && !rtcClient.isConnected()) {
+                console.log('Device is online but connection failed, attempting to reconnect');
+                reconnectAttempts = 0;
+                initViewer(remotePcId);
+            }
         });
         
         // Initialize WebRTC client - MODIFIED TO ALWAYS ENABLE CONTROLS & SPECIFY VP8 CODEC
@@ -839,7 +849,10 @@ async function initViewer(remotePcId) {
                     
                     setTimeout(() => {
                         reconnectAttempts++;
-                        initViewer(remotePcId);
+                        // Check if device is still online before attempting to reconnect
+                        viewerSocket.emit('device-status-request', {
+                            remotePcId: remotePcId
+                        });
                     }, delay);
                 }
             },
@@ -849,6 +862,11 @@ async function initViewer(remotePcId) {
                 
                 // Reset connecting state
                 isConnecting = false;
+                
+                // Try to refetch device status
+                viewerSocket.emit('device-status-request', {
+                    remotePcId: remotePcId
+                });
             }
         });
         
@@ -1188,6 +1206,9 @@ function refreshConnection() {
         if (remotePcId) {
             // Reset reconnection attempts
             reconnectAttempts = 0;
+            
+            // Disconnect any existing connections
+            disconnectFromDevice();
             
             // Reinitialize viewer
             initViewer(remotePcId);

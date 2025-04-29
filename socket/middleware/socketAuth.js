@@ -103,6 +103,10 @@ async function authenticateDevice(socket, next) {
         signalingService.extendSession(sid);
         // Also store connection mapping for better reconnection
         signalingService.storeConnection(remotePcId, sid);
+        // Update active connections map if the device reconnects
+        if (signalingService.activeConnections) {
+          signalingService.activeConnections.set(remotePcId, socket);
+        }
       } else {
         // Don't reject immediately, let Windows app fall back to new handshake
         logger.info(`Invalid or expired session for device ${remotePcId}, will use new handshake`);
